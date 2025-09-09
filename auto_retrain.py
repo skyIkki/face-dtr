@@ -53,7 +53,7 @@ BASE_TRAINING_DATA_DIR = "base_training_data"
 
 # NEW: Firebase Storage Bucket Name (CHECK THIS IN YOUR FIREBASE CONSOLE -> STORAGE)
 # It's usually something like 'your-project-id.appspot.com'
-FIREBASE_STORAGE_BUCKET = "flower-identification-c2ef6.firebasestorage.app"
+FIREBASE_STORAGE_BUCKET = "face-dtr-6efa3.firebasestorage.app"
 
 # NEW: Path within Firebase Storage where user data is uploaded by the Android app
 FIREBASE_USER_DATA_PREFIX = "user_training_data/"
