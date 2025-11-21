@@ -342,8 +342,7 @@ def main():
         # 6️⃣ Save model locally
         model.save(MODEL_SAVE_PATH)
         logging.info(f"✅ Model saved locally to {MODEL_SAVE_PATH}")
-        logging.info("MODEL SAVED AT:", os.path.abspath("face_recognition_model.h5"))
-        
+        logging.info(f"✅ MODEL SAVED AT: {os.path.abspath("face_recognition_model.h5")}")
         # 7️⃣ Upload model and artifacts to Firebase
         upload_artifacts_to_firebase()
         
