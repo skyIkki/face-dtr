@@ -68,3 +68,4 @@ jobs:
             echo "✨ Video-based retraining, TFLite conversion, and deployment successful!"
           else
             echo "🚨 Model retraining pipeline failed! Check logs."
+          fi
