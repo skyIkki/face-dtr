@@ -24,7 +24,7 @@ USER_VIDEO_DIR = "user_videos_temp"        # Temporary folder for downloaded vid
 USER_DATA_DIR = "user_training_data"      # Folder for extracted frames
 MODEL_SAVE_PATH = "face_recognition_model.h5"
 CLASS_MAPPING_FILE = "class_mapping.json"
-FIREBASE_BUCKET_NAME = "your-firebase-bucket.appspot.com"
+FIREBASE_BUCKET_NAME = "face-dtr-6efa3.firebasestorage.app"
 
 FRAME_RATE = 5  # extract 1 frame every N frames
 
