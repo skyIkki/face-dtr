@@ -1,4 +1,4 @@
-name: 🌸 Retrain Flower Model (CI/CD)
+name: Retrain Face Model (CI/CD)
 
 on:
   push:
