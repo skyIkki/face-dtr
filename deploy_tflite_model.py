@@ -7,7 +7,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 TFLITE_MODEL_PATH = "face_recognition_model.tflite"
 CLASS_MAPPING_PATH = "class_mapping.json"
-FIREBASE_BUCKET_NAME = "your-firebase-bucket.appspot.com" # CHANGE THIS TO YOUR ACTUAL BUCKET NAME
+FIREBASE_BUCKET_NAME = "face-dtr-6efa3.firebasestorage.app"
 
 def deploy_tflite_artifacts():
     """
