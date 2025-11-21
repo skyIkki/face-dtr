@@ -40,24 +40,19 @@ jobs:
           pip install opencv-python firebase-admin tensorflow
 
       - name: 🧠 Run Keras Model Training (and H5 Deployment)
-        # This step runs auto_retrain.py, which generates face_recognition_model.h5
-        # and class_mapping.json, and is assumed to deploy the .h5 file.
         env:
           FIREBASE_SERVICE_ACCOUNT_KEY: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_KEY }}
         run: python auto_retrain.py
 
       - name: 🛠️ Convert Keras Model to TFLite
-        # Runs the script generated previously to create face_recognition_model.tflite
         run: python convert_to_tflite.py
         
       - name: 🚀 Deploy TFLite Artifacts for Mobile
-        # Runs the new deployment script to upload TFLite model and mapping
         env:
           FIREBASE_SERVICE_ACCOUNT_KEY: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_KEY }}
         run: python deploy_tflite_model.py
 
       - name: 🧹 Clean up Artifacts
-        # Cleanup should now include the new TFLite model
         run: |
           rm -rf user_training_data/
           rm -f training_data_unified/
@@ -65,20 +60,18 @@ jobs:
           rm -f class_mapping.json
           rm -f model_version.txt
           rm -f face_recognition_model.tflite
-          rm -f firebase_creds.json # Clean up temporary cred file
+          rm -f firebase_creds.json
           
 ---
 
-      # ✅ BEGIN CORRECTED NOTIFICATION LOGIC
+      ## 🔔 Job Notifications (Fixed)
       
       - name: 🎉 Notify on Success
-        # Only runs if the job has succeeded up to this point
+        # Runs ONLY if all previous steps succeeded
         if: success()
         run: echo "✨ Model retraining, TFLite conversion, and deployment successful!"
 
       - name: ❌ Notify on Failure
-        # Only runs if the job has failed
+        # Runs ONLY if any previous step failed
         if: failure()
         run: echo "🚨 Model retraining pipeline failed! Check logs."
-        
-      # ❌ END CORRECTED NOTIFICATION LOGIC
