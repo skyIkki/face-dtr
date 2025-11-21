@@ -13,13 +13,14 @@ import requests
 import json
 import logging
 import random
-import PIL.Image # Ensure PIL is imported for the UnifiedDataset
-
-# --- NEW IMPORTS FOR FIREBASE STORAGE ---
+import PIL.Image
+# --- NEW/UPDATED IMPORTS ---
+import cv2 # Required for video processing
+import numpy as np # Used by cv2
 import firebase_admin
 from firebase_admin import credentials, storage
-import base64 # <--- THIS IS THE NEW IMPORT
-# ----------------------------------------
+import base64
+# ---------------------------
 
 # --- DEBUGGING LINES AT THE VERY TOP ---
 print("DEBUG: auto_retrain.py script execution started.")
@@ -42,24 +43,28 @@ set_all_seeds(42)
 logging.info("DEBUG: Random seeds set.")
 
 # ---------------------------
-# CONFIGURATION
+# CONFIGURATION (UPDATED FOR VIDEO)
 # ---------------------------
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-MODEL_OUTPUT = "best_flower_model_v3.pt"
+MODEL_OUTPUT = "best_face_model.pt" # Renamed output model for face recognition
 CLASS_MAPPING_FILE = "class_to_label.json"
-# REMOVED: DOWNLOAD_URL = "https://flower-upload-api.onrender.com/download-data"
-USER_DATA_DIR = "user_training_data"
-BASE_TRAINING_DATA_DIR = "base_training_data"
 
-# NEW: Firebase Storage Bucket Name (CHECK THIS IN YOUR FIREBASE CONSOLE -> STORAGE)
-# It's usually something like 'your-project-id.appspot.com'
+# --- DATA DIRECTORY CONFIGURATION ---
+# Renamed local user data directory to reflect video content
+USER_DATA_DIR = "video_training_data"
+# New temporary directory to hold extracted frames (images)
+EXTRACTED_FRAME_DIR = "extracted_frames" 
+BASE_TRAINING_DATA_DIR = "base_training_data"
+# ------------------------------------
+
+# NEW: Firebase Storage Bucket Name
 FIREBASE_STORAGE_BUCKET = "face-dtr-6efa3.firebasestorage.app"
 
-# NEW: Path within Firebase Storage where user data is uploaded by the Android app
-FIREBASE_USER_DATA_PREFIX = "user_training_data/"
+# UPDATED: Path within Firebase Storage where user data (videos) is uploaded
+FIREBASE_USER_DATA_PREFIX = "video_training_data/"
 
 # NEW: Path within Firebase Storage where the trained model and mapping will be uploaded
-FIREBASE_MODEL_UPLOAD_PREFIX = "" # Upload to root of bucket, or 'models/' if you prefer a subfolder
+FIREBASE_MODEL_UPLOAD_PREFIX = "" 
 
 # Training Hyperparameters
 BATCH_SIZE = 32
@@ -67,14 +72,13 @@ LEARNING_RATE = 0.001
 NUM_EPOCHS = 15
 VALIDATION_SPLIT_RATIO = 0.2 # 20% of combined data for validation
 
-# Oxford 102 Flowers dataset URLs (still not used for training data)
-# These are kept for context but are not actively used for data loading anymore
+# Oxford 102 Flowers dataset URLs (RETAINED, BUT NOT USED)
 FLOWER_URL = "http://www.robots.ox.ac.uk/~vgg/data/flowers/102/102flowers.tgz"
 LABELS_URL = "http://www.robots.ox.ac.uk/~vgg/data/flowers/102/imagelabels.mat"
 SETID_URL = "http://www.robots.ox.ac.uk/~vgg/data/flowers/102/setid.mat"
-
-# Oxford mapping (still not used for training data classes) - kept for completeness but not actively used for training class names
+# Oxford mapping (RETAINED, BUT NOT USED)
 OXFORD_CODE_TO_NAME_MAP = {
+    # ... (map content retained for context)
     "001": "pink primrose", "002": "globe thistle", "003": "blanket flower", "004": "trumpet creeper",
     "005": "blackberry lily", "006": "snapdragon", "007": "colt's foot", "008": "king protea",
     "009": "spear thistle", "010": "yellow iris", "011": "globe-flower", "012": "purple coneflower",
@@ -103,6 +107,7 @@ OXFORD_CODE_TO_NAME_MAP = {
     "099": "camellia", "100": "mallow", "101": "mexican petunia", "102": "bromelia"
 }
 
+
 # --- TRANSFORMS ---
 train_transform = transforms.Compose([
     transforms.RandomResizedCrop(224),
@@ -120,22 +125,17 @@ val_transform = transforms.Compose([
 
 # --- HELPER FUNCTIONS ---
 
-# NEW: Firebase Admin SDK Initialization
 def initialize_firebase_admin_sdk():
+    """Initializes Firebase Admin SDK using a Base64-encoded service account key."""
     logging.info("Initializing Firebase Admin SDK...")
     try:
-        # Load credentials from the environment variable (GitHub Secret)
-        service_account_base64 = os.environ.get('FIREBASE_SERVICE_ACCOUNT_KEY') # <--- GET THE BASE64 STRING
+        service_account_base64 = os.environ.get('FIREBASE_SERVICE_ACCOUNT_KEY')
         if service_account_base64 is None:
             logging.critical("FIREBASE_SERVICE_ACCOUNT_KEY environment variable not found. Cannot initialize Firebase.")
             raise ValueError("Firebase Service Account Key missing. Ensure it's set as a GitHub Secret.")
 
-        # Decode the Base64 string back to JSON
-        # <--- THIS IS THE NEW LINE FOR DECODING
         service_account_json_decoded = base64.b64decode(service_account_base64).decode('utf-8')
         
-        # Load the JSON string into a Python dictionary
-        # <--- USE THE DECODED STRING HERE
         cred = credentials.Certificate(json.loads(service_account_json_decoded))
         
         firebase_admin.initialize_app(cred, {
@@ -147,13 +147,13 @@ def initialize_firebase_admin_sdk():
         raise
 
 def download_user_data_from_firebase():
-    """Downloads user-uploaded training data from Firebase Storage."""
-    logging.info(f"📦 Checking for user-uploaded training data in Firebase Storage bucket '{FIREBASE_STORAGE_BUCKET}' under prefix '{FIREBASE_USER_DATA_PREFIX}'...")
+    """Downloads user-uploaded training data (videos) from Firebase Storage."""
+    logging.info(f"📦 Checking for user-uploaded video data in Firebase Storage bucket '{FIREBASE_STORAGE_BUCKET}' under prefix '{FIREBASE_USER_DATA_PREFIX}'...")
     
-    # Ensure the local directory exists
+    # Ensure the local video directory exists
     os.makedirs(USER_DATA_DIR, exist_ok=True)
     
-    bucket = storage.bucket() # Get the storage bucket object
+    bucket = storage.bucket()
 
     try:
         # List all blobs (files) under the specified prefix
@@ -162,11 +162,11 @@ def download_user_data_from_firebase():
         extracted_classes = set()
 
         for blob in blobs:
-            # Skip "directory" blobs themselves (e.g., "user_training_data/class_name/")
-            if blob.name.endswith('/'):
+            # Skip "directory" blobs
+            if blob.name.endswith('/') or not blob.name.lower().endswith(('.mp4', '.mov', '.avi')):
                 continue
             
-            # Construct local file path (e.g., user_training_data/rose/image1.jpg)
+            # Construct local file path (e.g., video_training_data/class_name/video1.mp4)
             relative_path = blob.name[len(FIREBASE_USER_DATA_PREFIX):]
             local_file_path = os.path.join(USER_DATA_DIR, relative_path)
             
@@ -177,8 +177,8 @@ def download_user_data_from_firebase():
                 blob.download_to_filename(local_file_path)
                 downloaded_files_count += 1
                 
-                # Extract class name from the relative path (e.g., "rose" from "rose/image1.jpg")
-                class_name = relative_path.split(os.sep)[0] # os.sep handles / or \
+                # Extract class name from the relative path
+                class_name = relative_path.split(os.sep)[0]
                 if class_name:
                     extracted_classes.add(class_name)
 
@@ -187,12 +187,92 @@ def download_user_data_from_firebase():
                 logging.warning(f"❌ Failed to download {blob.name}: {e}")
                 
         if downloaded_files_count > 0:
-            logging.info(f"✅ Downloaded {downloaded_files_count} user images for {len(extracted_classes)} classes from Firebase Storage.")
+            logging.info(f"✅ Downloaded {downloaded_files_count} user videos for {len(extracted_classes)} classes from Firebase Storage.")
         else:
-            logging.info("ℹ️ No user-uploaded data found in Firebase Storage under the specified prefix.")
+            logging.info("ℹ️ No user-uploaded video data found in Firebase Storage under the specified prefix.")
 
     except Exception as e:
         logging.warning(f"❌ An error occurred during Firebase Storage download: {e}")
+
+
+def extract_frames_from_videos():
+    """
+    Processes videos in USER_DATA_DIR, extracts 5 uniformly sampled frames
+    from each video, and saves them as images in EXTRACTED_FRAME_DIR.
+    """
+    logging.info("🎥 Starting frame extraction from downloaded videos...")
+    
+    if os.path.exists(EXTRACTED_FRAME_DIR):
+        shutil.rmtree(EXTRACTED_FRAME_DIR)
+    os.makedirs(EXTRACTED_FRAME_DIR, exist_ok=True)
+    
+    videos_processed = 0
+    frames_extracted = 0
+    
+    # Iterate through the class directories in USER_DATA_DIR (video_training_data)
+    for class_name in os.listdir(USER_DATA_DIR):
+        class_dir_path = os.path.join(USER_DATA_DIR, class_name)
+        
+        if not os.path.isdir(class_dir_path):
+            continue
+            
+        # Create the corresponding output directory for the frames
+        output_class_dir = os.path.join(EXTRACTED_FRAME_DIR, class_name)
+        os.makedirs(output_class_dir, exist_ok=True)
+
+        for video_filename in os.listdir(class_dir_path):
+            if not video_filename.lower().endswith(('.mp4', '.mov', '.avi')):
+                continue
+
+            video_path = os.path.join(class_dir_path, video_filename)
+            video_name_base = os.path.splitext(video_filename)[0]
+            
+            try:
+                cap = cv2.VideoCapture(video_path)
+                if not cap.isOpened():
+                    logging.warning(f"Could not open video file: {video_path}")
+                    continue
+                
+                frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                fps = cap.get(cv2.CAP_PROP_FPS)
+                duration_sec = frame_count / fps if fps > 0 else 0
+                
+                # --- Frame Sampling Strategy ---
+                # We aim to get 5 frames, one for each face movement step (L/R/U/D/Blink).
+                # Sample 5 frames uniformly distributed across the video duration.
+                NUM_SAMPLES = 5
+                
+                # Calculate time points (in seconds) for sampling
+                if duration_sec > 0:
+                    time_points = np.linspace(0, duration_sec, NUM_SAMPLES + 2)[1:-1] # Skip start/end
+                else:
+                    logging.warning(f"Video {video_path} has zero duration. Skipping.")
+                    continue
+
+                for i, t in enumerate(time_points):
+                    # Set the frame position in milliseconds
+                    cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000)
+                    ret, frame = cap.read()
+                    
+                    if ret:
+                        # Save the frame as JPEG
+                        frame_output_path = os.path.join(output_class_dir, f"{video_name_base}_frame_{i+1}.jpg")
+                        cv2.imwrite(frame_output_path, frame)
+                        frames_extracted += 1
+                        logging.debug(f"Extracted frame {i+1} at {t:.2f}s from {video_filename}")
+                
+                cap.release()
+                videos_processed += 1
+                
+            except Exception as e:
+                logging.error(f"Error processing video {video_path}: {e}")
+
+    logging.info(f"✅ Finished frame extraction. Processed {videos_processed} videos and extracted {frames_extracted} frames.")
+    
+    # Clean up the original video directory after extraction to save space/prevent confusion
+    if os.path.exists(USER_DATA_DIR):
+        shutil.rmtree(USER_DATA_DIR)
+        logging.info(f"Cleaned up original video directory: {USER_DATA_DIR}")
 
 
 class UnifiedDataset(torch.utils.data.Dataset):
@@ -208,7 +288,7 @@ class UnifiedDataset(torch.utils.data.Dataset):
                 self.samples.append((path, unified_idx))
             else:
                 logging.warning(f"Class '{original_class_string}' for image '{path}' not found in unified mapping. Skipping image.")
-        
+                
         self.transform = transform
         # The classes for this dataset are the sorted list of unique common names
         self.classes = sorted(list(unified_class_string_to_idx.keys()))
@@ -225,24 +305,21 @@ class UnifiedDataset(torch.utils.data.Dataset):
 
 def get_merged_datasets():
     """
-    Loads a base dataset (always present in repo) and merges with user-uploaded datasets.
-    The final class mapping and the trained model will reflect all classes from
-    both the base data and user data.
+    Loads a base dataset and merges with user-extracted frames (images) from videos.
     """
     logging.info("📂 Loading base and user datasets...")
 
     all_unique_common_names = set()
     all_raw_samples = [] # To store (image_path, class_string) tuples from all sources
-
-    # --- Load Base Dataset ---
+    
+    # --- Source 1: Base Dataset ---
     base_dataset = None
     if os.path.exists(BASE_TRAINING_DATA_DIR) and os.listdir(BASE_TRAINING_DATA_DIR):
         try:
             # Use a temporary transform that only reads the image without normalization
-            # The actual transform will be applied later in UnifiedDataset
             temp_transform = transforms.Compose([
-                transforms.Resize((224, 224)), # Resize for consistency
-                transforms.ToTensor() # Just to load it, not for normalization yet
+                transforms.Resize((224, 224)),
+                transforms.ToTensor() 
             ])
             
             base_dataset = datasets.ImageFolder(BASE_TRAINING_DATA_DIR, transform=temp_transform)
@@ -256,39 +333,40 @@ def get_merged_datasets():
                 logging.warning("Base dataset directory found, but it appears empty or could not load any images.")
                 base_dataset = None
         except Exception as e:
-            logging.warning(f"Could not load base dataset from '{BASE_TRAINING_DATA_DIR}': {e}. Ensure folder structure is correct (base_training_data/class_name/image.jpg).")
+            logging.warning(f"Could not load base dataset from '{BASE_TRAINING_DATA_DIR}': {e}. Proceeding without it.")
             base_dataset = None
     else:
-        logging.warning(f"Base dataset directory '{BASE_TRAINING_DATA_DIR}' not found or is empty. Proceeding without it, but this is the initial data source.")
+        logging.warning(f"Base dataset directory '{BASE_TRAINING_DATA_DIR}' not found or is empty. Proceeding without it.")
 
-    # --- Load User Dataset ---
+    # --- Source 2: User Extracted Frames Dataset ---
     user_dataset = None
-    if os.path.exists(USER_DATA_DIR) and os.listdir(USER_DATA_DIR):
+    if os.path.exists(EXTRACTED_FRAME_DIR) and os.listdir(EXTRACTED_FRAME_DIR):
         try:
             temp_transform = transforms.Compose([
                 transforms.Resize((224, 224)),
                 transforms.ToTensor()
             ])
-            user_dataset = datasets.ImageFolder(USER_DATA_DIR, transform=temp_transform)
+            # Load the user data from the newly created extracted frames directory
+            user_dataset = datasets.ImageFolder(EXTRACTED_FRAME_DIR, transform=temp_transform)
             if user_dataset and len(user_dataset) > 0:
-                logging.info(f"Loaded {len(user_dataset)} images from user-uploaded data with {len(user_dataset.classes)} classes.")
+                logging.info(f"Loaded {len(user_dataset)} images from user-extracted frames with {len(user_dataset.classes)} classes.")
                 for path, original_idx in user_dataset.samples:
                     class_string = user_dataset.classes[original_idx]
                     all_raw_samples.append((path, class_string))
                     all_unique_common_names.add(class_string)
             else:
-                logging.info("User dataset directory found, but it appears empty or could not load any images.")
+                logging.info("Extracted frames directory found, but it appears empty or could not load any images.")
                 user_dataset = None
         except Exception as e:
-            logging.warning(f"Could not load user dataset from '{USER_DATA_DIR}': {e}. Ensure folder structure is correct (user_training_data/class_name/image.jpg).")
+            logging.warning(f"Could not load user data from '{EXTRACTED_FRAME_DIR}': {e}. Proceeding without it.")
             user_dataset = None
     else:
-        logging.info(f"User dataset directory '{USER_DATA_DIR}' not found or is empty. Proceeding without it.")
+        logging.info(f"User extracted frames directory '{EXTRACTED_FRAME_DIR}' not found or is empty. Proceeding without it.")
 
     # --- Finalize Combined Dataset ---
     if not all_raw_samples: # Check if there's any data at all
         logging.critical("No base or user-uploaded classes/images found for training. Aborting.")
-        raise ValueError("No data available for training. Ensure 'base_training_data' has images and/or user data is uploaded.")
+        raise ValueError("No data available for training. Ensure 'base_training_data' has images and/or user videos were processed correctly.")
 
     logging.info(f"✅ Total unique common names for training: {len(all_unique_common_names)}")
 
@@ -310,11 +388,11 @@ def get_merged_datasets():
     val_size = len(full_unified_dataset) - train_size
     
     # Handle very small datasets for train/val split
-    if len(full_unified_dataset) < 2: # Need at least 2 images for a meaningful split
+    if len(full_unified_dataset) < 2: 
         logging.warning("Combined dataset has fewer than 2 images. Will use all for training, validation set will be empty.")
         train_size = len(full_unified_dataset)
         val_size = 0
-    elif train_size == 0: # Ensure train_size is at least 1 if full_unified_dataset > 0
+    elif train_size == 0:
         train_size = 1
         val_size = len(full_unified_dataset) - train_size
         logging.warning("Training set would be 0, adjusted to 1 image. Validation set will be smaller.")
@@ -322,7 +400,6 @@ def get_merged_datasets():
     train_subset, val_subset = random_split(full_unified_dataset, [train_size, val_size])
 
     final_train_loader = DataLoader(train_subset, batch_size=BATCH_SIZE, shuffle=True, num_workers=os.cpu_count() // 2 or 1)
-    # Only create val_loader if val_subset is not empty
     final_val_loader = DataLoader(val_subset, batch_size=BATCH_SIZE, shuffle=False, num_workers=os.cpu_count() // 2 or 1) if len(val_subset) > 0 else []
 
     logging.info(f"Training loader size: {len(train_subset)} images, Validation loader size: {len(val_subset)} images.")
@@ -437,8 +514,7 @@ def save_model_and_mapping(model, classes):
     """Saves the TorchScript model and class-to-label mapping locally, then uploads to Firebase."""
     model.eval()
 
-    # Ensure the model is on CPU for scripting if it was on GPU during training,
-    # as scripted models are typically deployed to CPU environments.
+    # Ensure the model is on CPU for scripting 
     model_on_cpu = model.to('cpu')
     scripted_model = torch.jit.script(model_on_cpu)
     
@@ -457,14 +533,11 @@ def save_model_and_mapping(model, classes):
     upload_to_firebase_storage(MODEL_OUTPUT, os.path.join(FIREBASE_MODEL_UPLOAD_PREFIX, MODEL_OUTPUT))
     upload_to_firebase_storage(CLASS_MAPPING_FILE, os.path.join(FIREBASE_MODEL_UPLOAD_PREFIX, CLASS_MAPPING_FILE))
 
-    # Increment model version (you'd need a model_version.txt in your repo or storage)
-    # This part requires managing model_version.txt's current state.
-    # A simple approach is to read, increment, then upload.
-    # For initial setup, you might just create it.
+    # Increment model version 
     model_version_file = "model_version.txt"
     current_version = 0
     
-    # NEW: Try to download model_version.txt from Firebase Storage first
+    # Try to download model_version.txt from Firebase Storage first
     try:
         bucket = storage.bucket()
         blob = bucket.blob(os.path.join(FIREBASE_MODEL_UPLOAD_PREFIX, model_version_file))
@@ -472,8 +545,7 @@ def save_model_and_mapping(model, classes):
         current_version = int(version_data.strip())
         logging.info(f"Downloaded existing model_version.txt from Firebase: v{current_version}")
     except Exception as e:
-        logging.warning(f"Could not download model_version.txt from Firebase or parse it: {e}. Starting version at 0 (or continuing from local if it exists).")
-        # Fallback to local file if Firebase download failed or was not found
+        logging.warning(f"Could not download model_version.txt from Firebase or parse it: {e}. Starting version at 0.")
         if os.path.exists(model_version_file):
             try:
                 with open(model_version_file, "r") as f:
@@ -483,7 +555,7 @@ def save_model_and_mapping(model, classes):
                 logging.warning(f"Could not read integer from local {model_version_file}. Starting version at 0.")
                 current_version = 0
         else:
-            current_version = 0 # Default to 0 if neither local nor remote found
+            current_version = 0 
 
     new_version = current_version + 1
     with open(model_version_file, "w") as f:
@@ -498,23 +570,25 @@ def save_model_and_mapping(model, classes):
 if __name__ == "__main__":
     logging.info("DEBUG: Entering main execution block of auto_retrain.py.")
 
-    # NEW: Initialize Firebase Admin SDK first
+    # 1. Initialize Firebase Admin SDK
     try:
         initialize_firebase_admin_sdk()
     except Exception:
         logging.critical("Firebase Admin SDK initialization failed. Aborting script.")
         exit(1)
 
-    # 1. Skip Oxford 102 Flower dataset download and preparation
-    logging.info("DEBUG: Skipping Oxford data download and preparation as requested.")
+    # 2. Download uploaded user data (videos)
+    logging.info("DEBUG: Starting user video download from Firebase Storage.")
+    download_user_data_from_firebase()
+    logging.info("DEBUG: User video download complete.")
+    
+    # 3. Process videos and extract frames (NEW STEP)
+    logging.info("DEBUG: Starting frame extraction from videos.")
+    extract_frames_from_videos()
+    logging.info("DEBUG: Frame extraction complete.")
 
-    # 2. Download uploaded user data (NEW FUNCTION CALL)
-    logging.info("DEBUG: Starting user data download from Firebase Storage.")
-    download_user_data_from_firebase() # CALL THE NEW FUNCTION
-    logging.info("DEBUG: User data download complete.")
-
-    # 3. Load base and user datasets
-    logging.info("DEBUG: Getting merged datasets (base + user).")
+    # 4. Load base and user datasets (now reading from EXTRACTED_FRAME_DIR)
+    logging.info("DEBUG: Getting merged datasets (base + extracted frames).")
     try:
         train_loader, val_loader, all_classes, num_classes = get_merged_datasets()
         logging.info(f"DEBUG: Merged datasets loaded. Number of unique classes: {num_classes}")
@@ -525,15 +599,15 @@ if __name__ == "__main__":
         if len(train_loader.dataset) == 0:
             logging.critical("Training dataset (base + user data) is empty. Cannot train a model.")
             exit(1)
-    except ValueError as ve: # Catch the specific error from get_merged_datasets
+    except ValueError as ve: 
         logging.critical(f"Failed to load datasets: {ve}. Aborting.")
         exit(1)
-    except Exception as e: # Catch any other unexpected errors
+    except Exception as e:
         logging.critical(f"An unexpected error occurred while preparing datasets: {e}. Aborting.")
         exit(1)
 
 
-    # 4. Build & train model
+    # 5. Build & train model
     logging.info("DEBUG: Building model.")
     model = build_model(num_classes)
     criterion = nn.CrossEntropyLoss()
@@ -543,7 +617,7 @@ if __name__ == "__main__":
     trained_model = train_model(model, train_loader, val_loader, NUM_EPOCHS, criterion, optimizer)
     logging.info("DEBUG: Model training finished.")
 
-    # 5. Save TorchScript model and class mapping locally, then upload to Firebase Storage
+    # 6. Save TorchScript model and class mapping locally, then upload to Firebase Storage
     logging.info("DEBUG: Saving model and mapping files locally and uploading to Firebase.")
     try:
         save_model_and_mapping(trained_model, all_classes)
@@ -552,33 +626,33 @@ if __name__ == "__main__":
         logging.critical(f"Failed to save or upload model/class mapping: {e}. Aborting.")
         exit(1)
 
-    # Clean up downloaded files
+    # 7. Clean up downloaded files
     logging.info("DEBUG: Starting cleanup of raw data.")
-    for f in ["102flowers.tgz", "imagelabels.mat", "setid.mat"]: # These are old files, likely not created now
+    
+    # Clean up base directory for extracted frames
+    if os.path.exists(EXTRACTED_FRAME_DIR):
+        shutil.rmtree(EXTRACTED_FRAME_DIR)
+        logging.info(f"Cleaned up: {EXTRACTED_FRAME_DIR} directory.")
+        
+    # Clean up temp files
+    for f in ["102flowers.tgz", "imagelabels.mat", "setid.mat"]:
         if os.path.exists(f):
             os.remove(f)
             logging.info(f"Cleaned up: {f}")
-    if os.path.exists("jpg"): # This is also an old directory, likely not created now
+    if os.path.exists("jpg"): 
         shutil.rmtree("jpg")
         logging.info("Cleaned up: jpg directory.")
-    
-    # Clean up user_training_data directory downloaded from Firebase
-    if os.path.exists(USER_DATA_DIR):
-        shutil.rmtree(USER_DATA_DIR)
-        logging.info(f"Cleaned up: {USER_DATA_DIR} directory.")
-    
-    # Also clean up locally saved model and mapping files after upload if desired,
-    # or keep them for debugging if the action runner automatically cleans up anyway.
+        
     if os.path.exists(MODEL_OUTPUT):
         os.remove(MODEL_OUTPUT)
         logging.info(f"Cleaned up local {MODEL_OUTPUT}.")
     if os.path.exists(CLASS_MAPPING_FILE):
         os.remove(CLASS_MAPPING_FILE)
         logging.info(f"Cleaned up local {CLASS_MAPPING_FILE}.")
-    if os.path.exists("best_model_weights.pth"): # Temp file created during training
+    if os.path.exists("best_model_weights.pth"):
         os.remove("best_model_weights.pth")
         logging.info("Cleaned up local best_model_weights.pth.")
-    if os.path.exists("model_version.txt"): # This file is also uploaded
+    if os.path.exists("model_version.txt"):
         os.remove("model_version.txt")
         logging.info("Cleaned up local model_version.txt.")
 
