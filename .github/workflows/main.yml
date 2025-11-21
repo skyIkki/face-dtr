@@ -66,12 +66,19 @@ jobs:
           rm -f model_version.txt
           rm -f face_recognition_model.tflite
           rm -f firebase_creds.json # Clean up temporary cred file
+          
+---
 
-      - name: 🔔 Notify on Completion
-        if: always()
-        run: |
-          if [ "${{ job.status }}" == "success" ]; then
-            echo "✨ Model retraining, TFLite conversion, and deployment successful!"
-          else
-            echo "🚨 Model retraining pipeline failed! Check logs."
-          fi
+      # ✅ BEGIN CORRECTED NOTIFICATION LOGIC
+      
+      - name: 🎉 Notify on Success
+        # Only runs if the job has succeeded up to this point
+        if: success()
+        run: echo "✨ Model retraining, TFLite conversion, and deployment successful!"
+
+      - name: ❌ Notify on Failure
+        # Only runs if the job has failed
+        if: failure()
+        run: echo "🚨 Model retraining pipeline failed! Check logs."
+        
+      # ❌ END CORRECTED NOTIFICATION LOGIC
