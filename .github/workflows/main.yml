@@ -1,15 +1,20 @@
 name: Retrain Face Model (CI/CD)
 
 on:
+  # Trigger on push to main branch affecting training components
   push:
     branches:
       - main
     paths:
       - 'auto_retrain.py'
+      - 'convert_to_tflite.py'
+      - 'deploy_tflite_model.py'
       - 'base_training_data/**'
       - 'requirements.txt'
+  # Trigger daily retraining
   schedule:
     - cron: '0 0 * * *'
+  # Allow manual trigger from GitHub UI
   workflow_dispatch:
 
 jobs:
@@ -30,28 +35,43 @@ jobs:
       - name: 📦 Install Python Dependencies
         run: |
           pip install --upgrade pip
+          # Ensure firebase-admin and tensorflow are installed for training/conversion/deployment
           pip install -r requirements.txt
-          # Make sure opencv-python is included in requirements.txt
-          pip install opencv-python
+          pip install opencv-python firebase-admin tensorflow
 
-      - name: 🧠 Run Model Training Script
+      - name: 🧠 Run Keras Model Training (and H5 Deployment)
+        # This step runs auto_retrain.py, which generates face_recognition_model.h5
+        # and class_mapping.json, and is assumed to deploy the .h5 file.
         env:
           FIREBASE_SERVICE_ACCOUNT_KEY: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_KEY }}
         run: python auto_retrain.py
 
-      - name: 🧹 Clean up (Optional)
+      - name: 🛠️ Convert Keras Model to TFLite
+        # Runs the script generated previously to create face_recognition_model.tflite
+        run: python convert_to_tflite.py
+        
+      - name: 🚀 Deploy TFLite Artifacts for Mobile
+        # Runs the new deployment script to upload TFLite model and mapping
+        env:
+          FIREBASE_SERVICE_ACCOUNT_KEY: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_KEY }}
+        run: python deploy_tflite_model.py
+
+      - name: 🧹 Clean up Artifacts
+        # Cleanup should now include the new TFLite model
         run: |
           rm -rf user_training_data/
           rm -f training_data_unified/
           rm -f face_recognition_model.h5
           rm -f class_mapping.json
           rm -f model_version.txt
+          rm -f face_recognition_model.tflite
+          rm -f firebase_creds.json # Clean up temporary cred file
 
       - name: 🔔 Notify on Completion
         if: always()
         run: |
           if [ "${{ job.status }}" == "success" ]; then
-            echo "✨ Model retraining and deployment successful!"
+            echo "✨ Model retraining, TFLite conversion, and deployment successful!"
           else
-            echo "🚨 Model retraining failed! Check logs."
+            echo "🚨 Model retraining pipeline failed! Check logs."
           fi
