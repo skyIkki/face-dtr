@@ -2,6 +2,7 @@ Flask==2.3.3
 gunicorn
 torch==2.7.1
 torchvision==0.22.1
+tensorflow==2.14.0
 Pillow
 numpy<2
 requests
@@ -9,3 +10,4 @@ scipy
 scikit-learn
 firebase-admin
 google-cloud-storage
+opencv-python
