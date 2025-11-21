@@ -13,7 +13,7 @@ import shutil
 import base64
 
 # -----------------------------
-# Config & Setup
+# Config & Setups
 # -----------------------------
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
