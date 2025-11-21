@@ -1,7 +1,6 @@
 name: Retrain Face Model (CI/CD)
 
 on:
-  # Trigger on push to main branch affecting training components
   push:
     branches:
       - main
@@ -9,12 +8,10 @@ on:
       - 'auto_retrain.py'
       - 'convert_to_tflite.py'
       - 'deploy_tflite_model.py'
-      - 'requirements.txt'
       - 'base_training_data/**'
-  # Trigger daily retraining
+      - 'requirements.txt'
   schedule:
     - cron: '0 0 * * *'
-  # Allow manual trigger
   workflow_dispatch:
 
 jobs:
@@ -38,7 +35,7 @@ jobs:
           pip install -r requirements.txt
           pip install opencv-python firebase-admin tensorflow
 
-      - name: 🧠 Run Video-Based Model Training
+      - name: 🧠 Run Keras Model Training (and H5 Deployment)
         env:
           FIREBASE_SERVICE_ACCOUNT_KEY: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_KEY }}
         run: python auto_retrain.py
@@ -46,26 +43,26 @@ jobs:
       - name: 🛠️ Convert Keras Model to TFLite
         run: python convert_to_tflite.py
 
-      - name: 🚀 Deploy TFLite Artifacts to Firebase
+      - name: 🚀 Deploy TFLite Artifacts for Mobile
         env:
           FIREBASE_SERVICE_ACCOUNT_KEY: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_KEY }}
         run: python deploy_tflite_model.py
 
-      - name: 🧹 Cleanup Artifacts
+      - name: 🧹 Clean up Artifacts
         run: |
           rm -rf user_training_data/
-          rm -rf user_videos_temp/
+          rm -f training_data_unified/
           rm -f face_recognition_model.h5
-          rm -f face_recognition_model.tflite
           rm -f class_mapping.json
-          rm -f firebase_creds.json
           rm -f model_version.txt
+          rm -f face_recognition_model.tflite
+          rm -f firebase_creds.json
 
       - name: 🔔 Notify on Completion
         if: always()
         run: |
           if [ "${{ job.status }}" == "success" ]; then
-            echo "✨ Video-based retraining, TFLite conversion, and deployment successful!"
+            echo "✨ Model retraining, TFLite conversion, and deployment successful!"
           else
             echo "🚨 Model retraining pipeline failed! Check logs."
           fi
