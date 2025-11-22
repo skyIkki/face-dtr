@@ -1,5 +1,6 @@
 import os
 import json
+import base64 # Import base64 for decoding the secret
 from firebase_admin import initialize_app, storage, credentials
 import logging
 
@@ -7,9 +8,8 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 TFLITE_MODEL_PATH = "face_recognition_model.tflite"
 CLASS_MAPPING_PATH = "class_mapping.json"
-# IMPORTANT: Replace with your actual project ID to ensure compatibility.
-# The bucket name format is usually YOUR_PROJECT_ID.appspot.com
-FIREBASE_BUCKET_NAME = "face-dtr-6efa3.appspot.com" # Updated best practice for bucket naming
+# Using the exact bucket name from your working script for consistency
+FIREBASE_BUCKET_NAME = "face-dtr-6efa3.firebasestorage.app" 
 
 def deploy_tflite_artifacts():
     """
@@ -21,21 +21,26 @@ def deploy_tflite_artifacts():
         return
 
     temp_creds_path = "firebase_creds.json"
+    service_account_base64 = os.environ.get("FIREBASE_SERVICE_ACCOUNT_KEY")
 
     try:
-        service_account_key = os.environ.get("FIREBASE_SERVICE_ACCOUNT_KEY")
-        if not service_account_key:
+        if not service_account_base64:
             logging.error("FIREBASE_SERVICE_ACCOUNT_KEY environment variable not set.")
             return
 
-        # Explicitly check if the secret content is valid JSON.
-        # This is where the original 'Expecting value' error occurs implicitly.
+        # --- FIX: Apply Base64 Decoding first, then JSON parsing ---
         try:
-            logging.info("Attempting to parse service account key...")
-            service_account_data = json.loads(service_account_key)
-        except json.JSONDecodeError as jde:
-            logging.error(f"Failed to decode FIREBASE_SERVICE_ACCOUNT_KEY as JSON. Error: {jde}")
-            logging.error("Please ensure the secret in GitHub is a single, correctly formatted JSON string.")
+            logging.info("Attempting to decode and parse service account key...")
+            
+            # 1. Decode from Base64
+            decoded_json_string = base64.b64decode(service_account_base64).decode('utf-8')
+            
+            # 2. Parse the resulting JSON string
+            service_account_data = json.loads(decoded_json_string)
+            
+        except (base64.binascii.Error, json.JSONDecodeError, UnicodeDecodeError) as e:
+            logging.error(f"Failed to decode or parse FIREBASE_SERVICE_ACCOUNT_KEY. Error: {e}")
+            logging.error("Please ensure the secret in GitHub is a valid Base64-encoded JSON string.")
             return
 
         # Write the guaranteed valid JSON structure to a temporary file
@@ -44,7 +49,8 @@ def deploy_tflite_artifacts():
 
         # 1. Initialize Firebase Admin SDK
         cred = credentials.Certificate(temp_creds_path)
-        app = initialize_app(cred, {'storageBucket': FIREBASE_BUCKET_NAME})
+        # Initialize app with the correct bucket name
+        app = initialize_app(cred, {'storageBucket': FIREBASE_BUCKET_NAME}) 
         bucket = storage.bucket(app=app)
         
         # 2. Deploy the TFLite Model
