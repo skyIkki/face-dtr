@@ -64,7 +64,7 @@ jobs:
           git config user.email "actions@github.com"
 
           # Add the files that were changed by the pipeline
-          git add model_version.txt mobile_artifacts/ face_recognition_model.tflite # <-- Include tflite file if it's in the root
+          git add model_version.txt mobile_artifacts/
           
           # The '|| exit 0' makes the step pass if there are no changes to commit
           git commit -m "🤖 MLOps: Automated model update to v${NEW_VERSION}" || exit 0
