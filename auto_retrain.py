@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-auto_retrain.py
+auto_retrain.py (Embeddings version)
 - Downloads videos from Firebase under prefix "video_training_data/"
   expecting structure: video_training_data/<employee_id>/<videofile>.mp4
 - Extracts frames (uniform samples) to user_training_data/<employee_id>/
-- Trains MobileNetV2-based softmax classifier
-- Saves face_recognition_model.h5 and class_mapping.json (string keys)
-- Leaves artifacts for conversion/deployment; only removes temp dirs
+- Builds MobileNetV2 embedding extractor
+- Generates 128D embeddings per employee
+- Saves face_embedding_model.h5 (TFLite conversion ready) and face_embeddings.json
+- Temporary directories are cleaned up
 """
 
 import os
@@ -16,10 +17,10 @@ import logging
 import shutil
 import numpy as np
 import cv2
+import tensorflow as tf
 from tensorflow.keras.applications import MobileNetV2
-from tensorflow.keras import layers, models, regularizers
-from tensorflow.keras.preprocessing.image import ImageDataGenerator
-from tensorflow.keras.models import load_model
+from tensorflow.keras import layers, models
+from tensorflow.keras.preprocessing.image import img_to_array, load_img
 import firebase_admin
 from firebase_admin import credentials, storage as fb_storage
 
@@ -28,30 +29,26 @@ from firebase_admin import credentials, storage as fb_storage
 # -----------------------------
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-FIREBASE_PREFIX = "video_training_data/"           # where videos are in the bucket
-FIREBASE_BUCKET_NAME = "face-dtr-6efa3.firebasestorage.app"  # change if needed
+FIREBASE_PREFIX = "video_training_data/"
+FIREBASE_BUCKET_NAME = "face-dtr-6efa3.firebasestorage.app"
 
-USER_VIDEO_DIR = "user_videos_temp"               # temp downloaded raw videos
-USER_DATA_DIR = "user_training_data"              # extracted frames for training (folders per employee)
-MODEL_SAVE_PATH = "face_recognition_model.h5"
-CLASS_MAPPING_FILE = "class_mapping.json"
+USER_VIDEO_DIR = "user_videos_temp"
+USER_DATA_DIR = "user_training_data"
+MODEL_SAVE_PATH = "face_embedding_model.h5"
+EMBEDDINGS_FILE = "face_embeddings.json"
 
 TARGET_SIZE = (160, 160)
-BATCH_SIZE = 16
-NUM_EPOCHS = 10
-NUM_SAMPLES_PER_VIDEO = 10   # sample uniformly from the video (20s -> pick 10 frames)
-VALIDATION_SPLIT = 0.20
-RANDOM_SEED = 42
+NUM_SAMPLES_PER_VIDEO = 10  # frames per video
 
 # -----------------------------
-# Firebase init (expects base64-encoded JSON in env var)
+# Firebase init
 # -----------------------------
 def initialize_firebase():
     if firebase_admin._apps:
         return
     svc_b64 = os.environ.get("FIREBASE_SERVICE_ACCOUNT_KEY")
     if not svc_b64:
-        logging.critical("FIREBASE_SERVICE_ACCOUNT_KEY environment variable missing (base64 JSON expected).")
+        logging.critical("FIREBASE_SERVICE_ACCOUNT_KEY environment variable missing.")
         raise SystemExit(1)
     try:
         svc_json = base64.b64decode(svc_b64).decode("utf-8")
@@ -76,10 +73,8 @@ def download_videos_from_firebase():
     employee_ids = set()
     downloaded = 0
     for blob in blobs:
-        # skip directory placeholders
         if blob.name.endswith('/') or not blob.name.lower().endswith((".mp4", ".mov", ".avi")):
             continue
-        # path like video_training_data/<employee_id>/<file>
         relative = blob.name[len(FIREBASE_PREFIX):]
         parts = relative.split('/')
         if len(parts) < 2:
@@ -93,14 +88,13 @@ def download_videos_from_firebase():
         try:
             blob.download_to_filename(local_path)
             downloaded += 1
-            logging.debug(f"Downloaded {blob.name} -> {local_path}")
         except Exception as e:
             logging.error(f"Failed to download {blob.name}: {e}")
     logging.info(f"Downloaded {downloaded} videos across {len(employee_ids)} employees.")
     return sorted(employee_ids)
 
 # -----------------------------
-# Extract frames uniformly per video into USER_DATA_DIR/<emp_id>/
+# Extract frames uniformly per video
 # -----------------------------
 def extract_frames_from_videos(employee_ids):
     if os.path.exists(USER_DATA_DIR):
@@ -126,13 +120,11 @@ def extract_frames_from_videos(employee_ids):
                 continue
 
             frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
-            fps = cap.get(cv2.CAP_PROP_FPS) or 0
             if frame_count == 0:
                 logging.warning(f"No frames in {path}")
                 cap.release()
                 continue
 
-            # sample NUM_SAMPLES_PER_VIDEO indices uniformly (avoid first/last frames if noisy)
             indices = np.linspace(0, frame_count - 1, NUM_SAMPLES_PER_VIDEO + 2, dtype=int)[1:-1]
             saved = 0
             for i, idx in enumerate(indices):
@@ -140,8 +132,6 @@ def extract_frames_from_videos(employee_ids):
                 ret, frame = cap.read()
                 if not ret or frame is None:
                     continue
-                # optional: convert BGR->RGB
-                # frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 out_path = os.path.join(out_dir, f"{os.path.splitext(fname)[0]}_f{i+1}.jpg")
                 cv2.imwrite(out_path, frame)
                 saved += 1
@@ -152,86 +142,54 @@ def extract_frames_from_videos(employee_ids):
     logging.info(f"Finished extracting frames: {total_frames} frames from {total_videos} videos.")
 
 # -----------------------------
-# Build the classifier model
+# Build embedding model
 # -----------------------------
-def build_classifier(num_classes):
-    base = MobileNetV2(input_shape=TARGET_SIZE + (3,), include_top=False, weights="imagenet")
+def build_embedding_model():
+    base = MobileNetV2(input_shape=TARGET_SIZE + (3,), include_top=False, weights='imagenet')
     base.trainable = False
-    model = models.Sequential([
-        base,
-        layers.GlobalAveragePooling2D(),
-        layers.Dense(256, activation="relu", kernel_regularizer=regularizers.l2(0.01)),
-        layers.Dropout(0.5),
-        layers.Dense(num_classes, activation="softmax")
-    ])
-    model.compile(optimizer="adam", loss="categorical_crossentropy", metrics=["accuracy"])
-    logging.info("Built MobileNetV2 classifier head (softmax).")
+    x = layers.GlobalAveragePooling2D()(base.output)
+    x = layers.Dense(128)(x)
+    x = layers.Lambda(lambda t: tf.math.l2_normalize(t, axis=1))(x)
+    model = models.Model(inputs=base.input, outputs=x)
+    logging.info("Built MobileNetV2 embedding model.")
     return model
 
 # -----------------------------
-# Train from USER_DATA_DIR folder structure
+# Generate embeddings per employee
 # -----------------------------
-def train_from_images():
-    # Check data exists
-    if not os.path.exists(USER_DATA_DIR) or not any(os.scandir(USER_DATA_DIR)):
-        logging.critical(f"No training images found in {USER_DATA_DIR}")
-        raise SystemExit(1)
+def generate_embeddings(model):
+    employee_dirs = [d for d in os.listdir(USER_DATA_DIR) if os.path.isdir(os.path.join(USER_DATA_DIR, d))]
+    embeddings = {}
 
-    datagen = ImageDataGenerator(
-        rescale=1./255,
-        rotation_range=10,
-        width_shift_range=0.1,
-        height_shift_range=0.1,
-        zoom_range=0.1,
-        horizontal_flip=True,
-        validation_split=VALIDATION_SPLIT
-    )
+    for emp_id in employee_dirs:
+        emp_path = os.path.join(USER_DATA_DIR, emp_id)
+        embeddings[emp_id] = []
+        for img_file in os.listdir(emp_path):
+            img_path = os.path.join(emp_path, img_file)
+            img = load_img(img_path, target_size=TARGET_SIZE)
+            x = img_to_array(img) / 255.0
+            x = np.expand_dims(x, axis=0)
+            emb = model.predict(x, verbose=0)
+            embeddings[emp_id].append(emb[0])
 
-    train_gen = datagen.flow_from_directory(
-        USER_DATA_DIR,
-        target_size=TARGET_SIZE,
-        batch_size=BATCH_SIZE,
-        class_mode='categorical',
-        subset='training',
-        shuffle=True,
-        seed=RANDOM_SEED
-    )
-
-    val_gen = datagen.flow_from_directory(
-        USER_DATA_DIR,
-        target_size=TARGET_SIZE,
-        batch_size=BATCH_SIZE,
-        class_mode='categorical',
-        subset='validation',
-        shuffle=False,
-        seed=RANDOM_SEED
-    )
-
-    num_classes = len(train_gen.class_indices)
-    logging.info(f"Training images: {train_gen.samples}, validation images: {val_gen.samples}, classes: {num_classes}")
-    if num_classes < 1:
-        logging.critical("Not enough classes to train.")
-        raise SystemExit(1)
-
-    model = build_classifier(num_classes)
-    model.fit(train_gen, validation_data=val_gen, epochs=NUM_EPOCHS, verbose=2)
-    model.save(MODEL_SAVE_PATH)
-    logging.info(f"Saved trained model to {MODEL_SAVE_PATH}")
-
-    # Save mapping: map index -> employee_id but keys as strings
-    # train_gen.class_indices is {label_string: index}
-    class_indices = train_gen.class_indices  # label -> index (int)
-    inverse_map = {str(index): label for label, index in class_indices.items()}
-    with open(CLASS_MAPPING_FILE, "w") as f:
-        json.dump(inverse_map, f, indent=4)
-    logging.info(f"Saved class mapping to {CLASS_MAPPING_FILE} (string keys).")
-    return model
+    # Average embeddings per employee
+    avg_embeddings = {emp_id: np.mean(np.vstack(embs), axis=0) for emp_id, embs in embeddings.items()}
+    return avg_embeddings
 
 # -----------------------------
-# Minimal cleanup (do NOT delete .h5/.json)
+# Save embeddings to JSON
+# -----------------------------
+def save_embeddings(embeddings, filepath=EMBEDDINGS_FILE):
+    emb_dict = {emp_id: emb.tolist() for emp_id, emb in embeddings.items()}
+    with open(filepath, "w") as f:
+        json.dump(emb_dict, f, indent=4)
+    logging.info(f"Saved embeddings to {filepath}")
+
+# -----------------------------
+# Cleanup temp dirs
 # -----------------------------
 def cleanup_temp_dirs():
-    for p in (USER_VIDEO_DIR, ):
+    for p in (USER_VIDEO_DIR, USER_DATA_DIR):
         if os.path.exists(p):
             try:
                 shutil.rmtree(p)
@@ -250,10 +208,12 @@ if __name__ == "__main__":
             raise SystemExit(1)
 
         extract_frames_from_videos(emp_ids)
-        train_from_images()
-        logging.info("Training pipeline finished. Model and mapping are preserved for conversion/deployment.")
+        model = build_embedding_model()
+        embeddings = generate_embeddings(model)
+        save_embeddings(embeddings)
+        model.save(MODEL_SAVE_PATH)
+        logging.info(f"Saved embedding model to {MODEL_SAVE_PATH}. Ready for TFLite conversion.")
     except Exception as e:
         logging.critical(f"Pipeline failed: {e}")
     finally:
-        # cleanup only temporary raw videos
         cleanup_temp_dirs()
