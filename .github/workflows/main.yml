@@ -53,26 +53,19 @@ jobs:
         env:
           FIREBASE_SERVICE_ACCOUNT_KEY: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_KEY }}
         run: python deploy_tflite_model.py
-        
-      - name: 💾 Commit and Push Version + Artifacts
+
+      - name: 💾 Commit and Push Artifacts + Version
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          git add model_version.txt mobile_artifacts/
-
-          git commit -m "🤖 Auto-update model artifacts (v$(cat model_version.txt))" || echo "No changes to commit"
-
-          git push
-      - name: 💾 Commit and Push Model Artifacts + Version
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
+          # Add mobile artifacts and version file
           git add mobile_artifacts/ model_version.txt
 
+          # Commit changes, skip if nothing to commit
           git commit -m "🤖 Auto-update model artifacts (v$(cat model_version.txt))" || echo "No changes to commit"
 
+          # Force push to avoid non-fast-forward errors
           git push origin main --force
 
       - name: 🧹 Clean up Temporary Artifacts (SAFE)
