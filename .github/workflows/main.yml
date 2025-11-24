@@ -58,14 +58,16 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          # Add mobile artifacts and version file
+      
+          # Add artifacts and version file
           git add mobile_artifacts/ model_version.txt
-
+      
           # Commit changes, skip if nothing to commit
           git commit -m "🤖 Auto-update model artifacts (v$(cat model_version.txt))" || echo "No changes to commit"
-
-          # Force push to avoid non-fast-forward errors
+      
+          # Fetch latest remote and reset local main to match it, then force push
+          git fetch origin main
+          git reset origin/main --soft
           git push origin main --force
 
       - name: 🧹 Clean up Temporary Artifacts (SAFE)
