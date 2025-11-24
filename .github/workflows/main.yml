@@ -35,9 +35,8 @@ jobs:
       - name: 📦 Install Python Dependencies
         run: |
           pip install --upgrade pip
-          # Ensure firebase-admin and tensorflow are installed for training/conversion/deployment
           pip install -r requirements.txt
-          pip install opencv-python firebase-admin tensorflow
+          pip install opencv-python firebase-admin tensorflow torch torchvision
 
       - name: 🧠 Run Keras Model Training (and H5 Deployment)
         env:
@@ -46,7 +45,10 @@ jobs:
 
       - name: 🛠️ Convert Keras Model to TFLite
         run: python convert_to_tflite.py
-        
+
+      - name: 🧬 Generate Employee Embeddings for Mobile
+        run: python employee_embeddings.py
+
       - name: 🚀 Deploy TFLite Artifacts for Mobile
         env:
           FIREBASE_SERVICE_ACCOUNT_KEY: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_KEY }}
@@ -61,17 +63,14 @@ jobs:
           rm -f model_version.txt
           rm -f face_recognition_model.tflite
           rm -f firebase_creds.json
-          
----
+          rm -rf mobile_artifacts/
 
       ## 🔔 Job Notifications (Fixed)
       
       - name: 🎉 Notify on Success
-        # Runs ONLY if all previous steps succeeded
         if: success()
-        run: echo "✨ Model retraining, TFLite conversion, and deployment successful!"
+        run: echo "✨ Model retraining, TFLite conversion, embeddings generation, and deployment successful!"
 
       - name: ❌ Notify on Failure
-        # Runs ONLY if any previous step failed
         if: failure()
         run: echo "🚨 Model retraining pipeline failed! Check logs."
