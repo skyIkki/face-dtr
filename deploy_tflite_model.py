@@ -97,7 +97,39 @@ def deploy_tflite_artifacts():
         # Cleanup temp credentials
         if os.path.exists(temp_creds_path):
             os.remove(temp_creds_path)
+            
+# -----------------------------
+# Versioning Function
+# -----------------------------
+VERSION_FILE_PATH = "model_version.txt" # Defined in Config section
 
+def update_model_version(filepath=VERSION_FILE_PATH):
+    """Reads, increments, and writes the new model version."""
+    current_version = 0
+    
+    # 1. Read Current Version
+    try:
+        if os.path.exists(filepath):
+            with open(filepath, 'r') as f:
+                content = f.read().strip()
+                if content:
+                    current_version = int(content)
+        else:
+            logging.warning(f"{filepath} not found. Starting version from 0.")
+    except Exception as e:
+        logging.error(f"Error reading version file, cannot update: {e}")
+        return
+
+    # 2. Increment and Write New Version
+    new_version = current_version + 1
+    
+    try:
+        with open(filepath, 'w') as f:
+            f.write(str(new_version))
+        logging.info(f"Successfully updated model_version.txt to {new_version}.")
+    except Exception as e:
+        logging.critical(f"FATAL: Failed to write new version to {filepath}: {e}")
+        raise # Fail the pipeline if the version can't be saved
 
 if __name__ == "__main__":
     deploy_tflite_artifacts()
