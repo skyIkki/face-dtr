@@ -29,9 +29,6 @@ jobs:
     steps:
       - name: 📥 Checkout Repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          persist-credentials: true
 
       - name: 🐍 Set up Python 3.10
         uses: actions/setup-python@v5
@@ -59,23 +56,6 @@ jobs:
         run: python deploy_tflite_model.py
         # deploy_tflite_model.py successfully runs the version update here
 
-      - name: 💾 Commit and Push Updated Model/Version
-        # This step now has the permission to push
-        run: |
-          # Read the NEW_VERSION that deploy_tflite_model.py just saved
-          NEW_VERSION=$(cat model_version.txt)
-
-          git config user.name "GitHub Actions Bot"
-          git config user.email "actions@github.com"
-
-          # Stage the files that were changed by the pipeline
-          git add model_version.txt mobile_artifacts/
-          
-          # The '|| exit 0' makes the step pass if there are no changes to commit
-          git commit -m "🤖 MLOps: Automated model update to v${NEW_VERSION}" || exit 0
-          
-          # Push the committed changes to the main branch
-          git push
 
       - name: 🧹 Clean up Artifacts
         # This step is correct and avoids deleting the files we just committed
