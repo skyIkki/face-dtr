@@ -6,20 +6,37 @@ import logging
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-TFLITE_MODEL_PATH = "face_recognition_model.tflite"
-CLASS_MAPPING_PATH = "class_mapping.json"
+# --- CORRECTED PATHS ---
+MOBILE_ARTIFACTS_DIR = "mobile_artifacts"
 
-# Same bucket your Android app is downloading from
+# Note: Correcting the TFLite model name to match the output of convert_to_tflite.py
+TFLITE_MODEL_NAME = "face_embedding_model.tflite"
+CLASS_MAPPING_NAME = "class_mapping.json"
+EMBEDDINGS_JSON_NAME = "employee_embeddings.json" # New artifact to deploy
+
+# Full local paths
+TFLITE_MODEL_PATH = os.path.join(MOBILE_ARTIFACTS_DIR, TFLITE_MODEL_NAME)
+CLASS_MAPPING_PATH = os.path.join(MOBILE_ARTIFACTS_DIR, CLASS_MAPPING_NAME)
+EMBEDDINGS_JSON_PATH = os.path.join(MOBILE_ARTIFACTS_DIR, EMBEDDINGS_JSON_NAME)
+
 FIREBASE_BUCKET_NAME = "face-dtr-6efa3.firebasestorage.app"
 
 def deploy_tflite_artifacts():
     """
-    Uploads the TFLite model + class mapping JSON to Firebase Storage.
-    This will be consumed by the Android app.
+    Uploads the TFLite model, class mapping JSON, and employee embeddings to Firebase Storage.
+    This is consumed by the Android app.
     """
-    # Verify artifacts exist
-    if not os.path.exists(TFLITE_MODEL_PATH) or not os.path.exists(CLASS_MAPPING_PATH):
-        logging.error("Required artifacts missing. Did training + conversion run?")
+    required_files = {
+        TFLITE_MODEL_PATH, 
+        CLASS_MAPPING_PATH, 
+        EMBEDDINGS_JSON_PATH
+    }
+    
+    # Verify all artifacts exist
+    missing_files = [f for f in required_files if not os.path.exists(f)]
+    
+    if missing_files:
+        logging.error(f"Required artifacts missing: {', '.join(missing_files)}. Did all preceding steps run successfully?")
         return
 
     # Load Base64 encoded creds
@@ -32,13 +49,12 @@ def deploy_tflite_artifacts():
 
     try:
         # ---------------------------------------------------------
-        # Decode the Base64 service account JSON
+        # Decode the Base64 service account JSON and save temporarily
         # ---------------------------------------------------------
         logging.info("Decoding Firebase service account (Base64)...")
         decoded_json = base64.b64decode(service_account_base64).decode("utf-8")
         creds_dict = json.loads(decoded_json)
 
-        # Save decoded credentials temporarily
         with open(temp_creds_path, "w") as f:
             json.dump(creds_dict, f)
 
@@ -46,22 +62,33 @@ def deploy_tflite_artifacts():
         # Initialize Firebase Admin SDK
         # ---------------------------------------------------------
         cred = credentials.Certificate(temp_creds_path)
-        app = initialize_app(cred, {"storageBucket": FIREBASE_BUCKET_NAME})
+        # Use try/except to handle case where app might already be initialized (though less common in scripts)
+        try:
+            app = initialize_app(cred, {"storageBucket": FIREBASE_BUCKET_NAME})
+        except ValueError:
+            # If the app is already initialized, just get the default one
+            app = initialize_app(cred, {"storageBucket": FIREBASE_BUCKET_NAME}, name="deploy_app")
+        
         bucket = storage.bucket(app=app)
 
         # ---------------------------------------------------------
-        # Upload TFLite Model
+        # Deployment Helper
         # ---------------------------------------------------------
-        model_blob = bucket.blob(f"mobile_artifacts/{TFLITE_MODEL_PATH}")
-        model_blob.upload_from_filename(TFLITE_MODEL_PATH)
-        logging.info(f"✅ Uploaded: mobile_artifacts/{TFLITE_MODEL_PATH}")
+        def upload_artifact(local_path, destination_name):
+            blob_path = f"mobile_artifacts/{destination_name}"
+            blob = bucket.blob(blob_path)
+            blob.upload_from_filename(local_path)
+            logging.info(f"✅ Uploaded: {blob_path}")
 
         # ---------------------------------------------------------
-        # Upload Class Mapping JSON
+        # Upload Artifacts
         # ---------------------------------------------------------
-        mapping_blob = bucket.blob(f"mobile_artifacts/{CLASS_MAPPING_PATH}")
-        mapping_blob.upload_from_filename(CLASS_MAPPING_PATH)
-        logging.info(f"✅ Uploaded: mobile_artifacts/{CLASS_MAPPING_PATH}")
+        upload_artifact(TFLITE_MODEL_PATH, TFLITE_MODEL_NAME)
+        upload_artifact(CLASS_MAPPING_PATH, CLASS_MAPPING_NAME)
+        upload_artifact(EMBEDDINGS_JSON_PATH, EMBEDDINGS_JSON_NAME)
+        
+        logging.info("🎉 All mobile artifacts deployed successfully!")
+
 
     except Exception as e:
         logging.error(f"Deployment failed: {e}")
