@@ -64,16 +64,16 @@ jobs:
           git commit -m "🤖 Auto-update model artifacts (v$(cat model_version.txt))" || echo "No changes to commit"
 
           git push
-      - name: 💾 Commit and Push Model + Artifacts
+      - name: 💾 Commit and Push Model Artifacts + Version
         run: |
-          git config user.name "GitHub Actions Bot"
-          git config user.email "actions@github.com"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          git add mobile_artifacts/
-          git add model_version.txt
+          git add mobile_artifacts/ model_version.txt
 
           git commit -m "🤖 Auto-update model artifacts (v$(cat model_version.txt))" || echo "No changes to commit"
-          git push
+
+          git push origin main --force
 
       - name: 🧹 Clean up Temporary Artifacts (SAFE)
         run: |
