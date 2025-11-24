@@ -1,7 +1,6 @@
 name: Retrain Face Model (CI/CD)
 
 on:
-  # Trigger on push to main branch affecting training components
   push:
     branches:
       - main
@@ -11,11 +10,12 @@ on:
       - 'deploy_tflite_model.py'
       - 'base_training_data/**'
       - 'requirements.txt'
-  # Trigger daily retraining
   schedule:
     - cron: '0 0 * * *'
-  # Allow manual trigger from GitHub UI
   workflow_dispatch:
+
+permissions:
+  contents: write   # 🔥 REQUIRED for git push
 
 jobs:
   train_and_deploy_model:
@@ -25,6 +25,9 @@ jobs:
     steps:
       - name: 📥 Checkout Repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: true   # 🔥 REQUIRED
+          fetch-depth: 0              # 🔥 REQUIRED
 
       - name: 🐍 Set up Python 3.10
         uses: actions/setup-python@v5
@@ -37,6 +40,7 @@ jobs:
           pip install --upgrade pip
           pip install -r requirements.txt
           pip install opencv-python firebase-admin tensorflow torch torchvision
+
       - name: 🧠 Run Keras Model Training (and H5 Deployment)
         env:
           FIREBASE_SERVICE_ACCOUNT_KEY: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_KEY }}
@@ -50,23 +54,27 @@ jobs:
           FIREBASE_SERVICE_ACCOUNT_KEY: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_KEY }}
         run: python deploy_tflite_model.py
 
+      - name: 💾 Commit and Push Model + Artifacts
+        run: |
+          git config user.name "GitHub Actions Bot"
+          git config user.email "actions@github.com"
 
+          git add mobile_artifacts/
+          git add model_version.txt
 
-      - name: 🧹 Clean up Artifacts
+          git commit -m "🤖 Auto-update model artifacts (v$(cat model_version.txt))" || echo "No changes to commit"
+          git push
+
+      - name: 🧹 Clean up Temporary Artifacts (SAFE)
         run: |
           rm -rf user_training_data/
           rm -f training_data_unified/
-          rm -f face_recognition_model.h5
-          rm -f class_mapping.json
-          rm -f model_version.txt
-          rm -f face_recognition_model.tflite
           rm -f firebase_creds.json
-          rm -rf mobile_artifacts/
-      ## 🔔 Job Notifications (Fixed)
-      
+          # ❗️KEEP mobile_artifacts/ and model_version.txt (they must be pushed)
+
       - name: 🎉 Notify on Success
         if: success()
-        run: echo "✨ Model retraining, TFLite conversion, embeddings generation, and deployment successful!"
+        run: echo "✨ Model retraining, TFLite conversion, and deployment successful!"
 
       - name: ❌ Notify on Failure
         if: failure()
