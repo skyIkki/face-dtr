@@ -46,15 +46,15 @@ jobs:
       - name: 🛠️ Convert Keras Model to TFLite
         run: python convert_to_tflite.py
 
-
+      - name: 🧬 Generate Employee Embeddings for Mobile
+        run: python employee_embeddings.py
 
       - name: 🚀 Deploy TFLite Artifacts for Mobile
         env:
           FIREBASE_SERVICE_ACCOUNT_KEY: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_KEY }}
         run: python deploy_tflite_model.py
 
-      - name: 🧬 Generate Employee Embeddings for Mobile
-        run: python employee_embeddings.py
+
 
       - name: 🧹 Clean up Artifacts
         run: |
