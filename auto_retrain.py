@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
 auto_retrain.py (Embeddings version)
-- Downloads videos from Firebase under prefix "video_training_data/"
-  expecting structure: video_training_data/<employee_id>/<videofile>.mp4
-- Extracts frames (uniform samples) to user_training_data/<employee_id>/
-- Builds MobileNetV2 embedding extractor
-- Generates 128D embeddings per employee
-- Saves face_embedding_model.h5 (TFLite conversion ready) and face_embeddings.json
-- Temporary directories are cleaned up
+- Downloads videos from Firebase.
+- Extracts frames to user_training_data/<employee_id>/.
+- Builds MobileNetV2 embedding extractor.
+- Generates 128D embeddings per employee.
+- Saves ALL necessary artifacts (Model, Embeddings, Mapping) to mobile_artifacts/.
+- Temporary directories are cleaned up.
 """
 
 import os
@@ -34,8 +33,12 @@ FIREBASE_BUCKET_NAME = "face-dtr-6efa3.firebasestorage.app"
 
 USER_VIDEO_DIR = "user_videos_temp"
 USER_DATA_DIR = "user_training_data"
-MODEL_SAVE_PATH = "face_embedding_model.h5"
-EMBEDDINGS_FILE = "face_embeddings.json"
+
+# --- ARTIFACTS CONFIG (CRITICAL CHANGES) ---
+MOBILE_ARTIFACTS_DIR = "mobile_artifacts" # New folder for final outputs
+MODEL_SAVE_PATH = os.path.join(MOBILE_ARTIFACTS_DIR, "face_embedding_model.h5")
+EMBEDDINGS_FILE = os.path.join(MOBILE_ARTIFACTS_DIR, "employee_embeddings.json") # Renamed for clarity in pipeline
+CLASS_MAPPING_FILE = os.path.join(MOBILE_ARTIFACTS_DIR, "class_mapping.json") # NEW ARTIFACT FILE
 
 TARGET_SIZE = (160, 160)
 NUM_SAMPLES_PER_VIDEO = 10  # frames per video
@@ -91,7 +94,7 @@ def download_videos_from_firebase():
         except Exception as e:
             logging.error(f"Failed to download {blob.name}: {e}")
     logging.info(f"Downloaded {downloaded} videos across {len(employee_ids)} employees.")
-    return sorted(employee_ids)
+    return sorted(list(employee_ids)) # Return list of unique employee IDs
 
 # -----------------------------
 # Extract frames uniformly per video
@@ -177,13 +180,23 @@ def generate_embeddings(model):
     return avg_embeddings
 
 # -----------------------------
-# Save embeddings to JSON
+# Save Artifacts
 # -----------------------------
-def save_embeddings(embeddings, filepath=EMBEDDINGS_FILE):
+def save_class_mapping(employee_ids, filepath=CLASS_MAPPING_FILE):
+    """Saves the mapping of numerical index to Employee ID, needed for the client."""
+    # Mapping format: {"0": "2019-0001", "1": "2019-0002", ...}
+    class_mapping = {str(i): emp_id for i, emp_id in enumerate(employee_ids)}
+    with open(filepath, "w") as f:
+        json.dump(class_mapping, f, indent=4)
+    logging.info(f"Saved class mapping to {filepath}")
+
+def save_embeddings_json(embeddings, filepath=EMBEDDINGS_FILE):
+    """Saves the averaged embedding vectors per employee."""
     emb_dict = {emp_id: emb.tolist() for emp_id, emb in embeddings.items()}
     with open(filepath, "w") as f:
         json.dump(emb_dict, f, indent=4)
     logging.info(f"Saved embeddings to {filepath}")
+
 
 # -----------------------------
 # Cleanup temp dirs
@@ -201,18 +214,30 @@ def cleanup_temp_dirs():
 # Main
 # -----------------------------
 if __name__ == "__main__":
+    # Ensure the artifact directory exists
+    os.makedirs(MOBILE_ARTIFACTS_DIR, exist_ok=True)
+    
     try:
         emp_ids = download_videos_from_firebase()
         if len(emp_ids) == 0:
             logging.critical("No employee videos found. Exiting.")
             raise SystemExit(1)
 
+        # 1. Save the class mapping before feature extraction
+        save_class_mapping(emp_ids)
+
+        # 2. Extract frames and build model
         extract_frames_from_videos(emp_ids)
         model = build_embedding_model()
+        
+        # 3. Generate embeddings
         embeddings = generate_embeddings(model)
-        save_embeddings(embeddings)
+        
+        # 4. Save final artifacts
+        save_embeddings_json(embeddings)
         model.save(MODEL_SAVE_PATH)
         logging.info(f"Saved embedding model to {MODEL_SAVE_PATH}. Ready for TFLite conversion.")
+        
     except Exception as e:
         logging.critical(f"Pipeline failed: {e}")
     finally:
