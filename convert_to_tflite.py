@@ -17,27 +17,26 @@ TFLITE_MODEL_PATH = os.path.join(MOBILE_ARTIFACTS_DIR, "face_embedding_model.tfl
 
 # In convert_to_tflite.py:
 def convert_keras_to_tflite():
-    # ... checks and model loading ...
-
+    # ... (os.path.exists check and model loading) ...
+    
     try:
         logging.info("Creating TFLite converter...")
         converter = tf.lite.TFLiteConverter.from_keras_model(model)
-
-        # ... (optimizations) ...
-
+        # Optional: enable size/speed optimizations
+        converter.optimizations = [tf.lite.Optimize.DEFAULT]
+        
         logging.info("Converting model to TFLite format...")
-        tflite_model = converter.convert() # <-- Defined here
+        tflite_model = converter.convert()
 
-        # --- ENSURE THESE LINES ARE WITHIN THE TRY BLOCK ---
+        # Save and log success INSIDE the try block
         with open(TFLITE_MODEL_PATH, "wb") as f:
             f.write(tflite_model)
 
         logging.info(f"✅ Conversion successful! Saved to {TFLITE_MODEL_PATH}")
         logging.info("You can now deploy this TFLite model to Android for real-time embeddings.")
-        # ----------------------------------------------------
 
     except Exception as e:
-        # Now, if an error happens during convert(), it gets caught here.
+        # If conversion fails, this catches it and logs it properly
         logging.error(f"Error during TFLite conversion: {e}")
 
 if __name__ == "__main__":
