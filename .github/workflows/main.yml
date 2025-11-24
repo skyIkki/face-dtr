@@ -1,7 +1,6 @@
 name: Retrain Face Model (CI/CD)
 
 on:
-  # Trigger on push to main branch affecting training components
   push:
     branches:
       - main
@@ -11,15 +10,12 @@ on:
       - 'deploy_tflite_model.py'
       - 'base_training_data/**'
       - 'requirements.txt'
-  # Trigger daily retraining
   schedule:
     - cron: '0 0 * * *'
-  # Allow manual trigger from GitHub UI
   workflow_dispatch:
 
-# CRITICAL FIX: Add permissions to allow the workflow to write back to the repository
 permissions:
-  contents: write # This grants permission to commit and push files
+  contents: write
 
 jobs:
   train_and_deploy_model:
@@ -29,6 +25,9 @@ jobs:
     steps:
       - name: 📥 Checkout Repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: true   # 🔥 REQUIRED TO ALLOW git push
+          fetch-depth: 0              # 🔥 REQUIRED FOR pushing commits
 
       - name: 🐍 Set up Python 3.10
         uses: actions/setup-python@v5
@@ -54,11 +53,17 @@ jobs:
         env:
           FIREBASE_SERVICE_ACCOUNT_KEY: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_KEY }}
         run: python deploy_tflite_model.py
-        # deploy_tflite_model.py successfully runs the version update here
 
+      - name: 💾 Commit and Push Updated Model/Version
+        run: |
+          NEW_VERSION=$(cat model_version.txt)
+          git config user.name "GitHub Actions Bot"
+          git config user.email "actions@github.com"
+          git add model_version.txt mobile_artifacts/
+          git commit -m "🤖 MLOps: Automated model update to v${NEW_VERSION}" || exit 0
+          git push
 
       - name: 🧹 Clean up Artifacts
-        # This step is correct and avoids deleting the files we just committed
         run: |
           rm -rf user_training_data/
           rm -f training_data_unified/
@@ -68,7 +73,7 @@ jobs:
 
       - name: 🎉 Notify on Success
         if: success()
-        run: echo "✨ Model retraining, TFLite conversion, embeddings generation, and deployment successful, and version committed!"
+        run: echo "✨ Model retraining, TFLite conversion, embeddings generation, and deployment successful!"
 
       - name: ❌ Notify on Failure
         if: failure()
