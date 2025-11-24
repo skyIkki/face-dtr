@@ -1,64 +1,55 @@
-# employee_embeddings.py
+# generate_embeddings.py
 import os
 import json
 import numpy as np
-from PIL import Image
-import torch
-import torchvision.transforms as transforms
-from model import FaceRecognitionModel  # Or replace with your own model import
+from tensorflow.keras.models import load_model
+from tensorflow.keras.preprocessing import image
 
-# --- CONFIG ---
-TRAINING_DATA_DIR = "training_data"
-OUTPUT_DIR = "mobile_artifacts"
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+# Paths
+MODEL_PATH = "mobile_artifacts/face_recognition_model.tflite"  # Or h5 if using Keras
+CLASS_MAPPING_PATH = "mobile_artifacts/class_mapping.json"
+OUTPUT_PATH = "mobile_artifacts/employee_embeddings.json"
+TRAINING_DATA_PATH = "training_data/"  # Same structure as before
 
-# --- MODEL SETUP ---
-device = "cuda" if torch.cuda.is_available() else "cpu"
-model = FaceRecognitionModel()  # Replace with your model class
-model.load_state_dict(torch.load("face_recognition_model.pth", map_location=device))  # your trained PyTorch weights
-model.eval()
-model.to(device)
+# Load class mapping
+with open(CLASS_MAPPING_PATH, "r") as f:
+    class_mapping = json.load(f)  # e.g., {"2019-0001":0, "2019-0002":1}
 
-# --- TRANSFORM ---
-input_size = 160
-transform = transforms.Compose([
-    transforms.Resize((input_size, input_size)),
-    transforms.ToTensor(),
-    transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])  # [-1,1] normalization
-])
+# Load your Keras model (if using .h5)
+from tensorflow.keras.models import load_model
+model = load_model("mobile_artifacts/face_recognition_model.h5")
 
-# --- EMBEDDING EXTRACTION ---
-def get_embedding(image_path):
-    img = Image.open(image_path).convert("RGB")
-    x = transform(img).unsqueeze(0).to(device)
-    with torch.no_grad():
-        embedding = model(x)
-    return embedding.squeeze().cpu().numpy()
+def get_embedding(img_path):
+    """Load image and return normalized embedding vector from model"""
+    img = image.load_img(img_path, target_size=(160, 160))
+    img_array = image.img_to_array(img)
+    img_array = np.expand_dims(img_array, axis=0)  # Batch dimension
+    img_array = img_array / 255.0  # Normalize
+    embedding = model.predict(img_array)
+    return embedding[0]  # Return as 1D array
 
-# --- MAIN PROCESS ---
-embeddings_dict = {}
-for employee_id in os.listdir(TRAINING_DATA_DIR):
-    employee_path = os.path.join(TRAINING_DATA_DIR, employee_id)
-    if not os.path.isdir(employee_path):
+# Generate embeddings per employee
+employee_embeddings = {}
+
+for employee_id in class_mapping:
+    emp_folder = os.path.join(TRAINING_DATA_PATH, employee_id)
+    if not os.path.exists(emp_folder):
         continue
 
-    all_embeddings = []
-    for img_file in os.listdir(employee_path):
-        img_path = os.path.join(employee_path, img_file)
-        try:
-            emb = get_embedding(img_path)
-            all_embeddings.append(emb)
-        except Exception as e:
-            print(f"❌ Failed for {img_path}: {e}")
+    embeddings_list = []
+    for img_file in os.listdir(emp_folder):
+        img_path = os.path.join(emp_folder, img_file)
+        embedding = get_embedding(img_path)
+        embeddings_list.append(embedding)
 
-    if all_embeddings:
-        avg_embedding = np.mean(all_embeddings, axis=0)
-        embeddings_dict[employee_id] = avg_embedding
+    # Average embedding per employee
+    if embeddings_list:
+        avg_embedding = np.mean(embeddings_list, axis=0).tolist()
+        employee_embeddings[employee_id] = avg_embedding
 
-        # Save JSON for Android
-        out_file = os.path.join(OUTPUT_DIR, f"{employee_id}.json")
-        with open(out_file, "w") as f:
-            json.dump({"employeeID": employee_id, "embedding": avg_embedding.tolist()}, f)
-        print(f"✅ Saved embedding for {employee_id}")
+# Save embeddings to JSON
+os.makedirs(os.path.dirname(OUTPUT_PATH), exist_ok=True)
+with open(OUTPUT_PATH, "w") as f:
+    json.dump(employee_embeddings, f)
 
-print("🎉 All embeddings generated successfully!")
+print(f"✅ Generated employee_embeddings.json at {OUTPUT_PATH}")
