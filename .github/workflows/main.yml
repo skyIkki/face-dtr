@@ -17,6 +17,10 @@ on:
   # Allow manual trigger from GitHub UI
   workflow_dispatch:
 
+# CRITICAL FIX: Add permissions to allow the workflow to write back to the repository
+permissions:
+  contents: write # This grants permission to commit and push files
+
 jobs:
   train_and_deploy_model:
     runs-on: ubuntu-latest
@@ -52,10 +56,8 @@ jobs:
         run: python deploy_tflite_model.py
         # deploy_tflite_model.py successfully runs the version update here
 
-      # --- START OF NEW/MODIFIED BLOCKS ---
-
       - name: 💾 Commit and Push Updated Model/Version
-        # This step commits the new model version and artifacts to Git
+        # This step now has the permission to push
         run: |
           # Read the NEW_VERSION that deploy_tflite_model.py just saved
           NEW_VERSION=$(cat model_version.txt)
@@ -63,7 +65,7 @@ jobs:
           git config user.name "GitHub Actions Bot"
           git config user.email "actions@github.com"
 
-          # Add the files that were changed by the pipeline
+          # Stage the files that were changed by the pipeline
           git add model_version.txt mobile_artifacts/
           
           # The '|| exit 0' makes the step pass if there are no changes to commit
@@ -73,22 +75,14 @@ jobs:
           git push
 
       - name: 🧹 Clean up Artifacts
-        # IMPORTANT: This step is modified to NOT delete model_version.txt or mobile_artifacts/
-        # as they were just committed and need to persist for the next run.
+        # This step is correct and avoids deleting the files we just committed
         run: |
           rm -rf user_training_data/
           rm -f training_data_unified/
           rm -f face_recognition_model.h5
           rm -f class_mapping.json
           rm -f firebase_creds.json
-          # Removed: rm -f model_version.txt
-          # Removed: rm -f face_recognition_model.tflite
-          # Removed: rm -rf mobile_artifacts/
 
-      # --- END OF NEW/MODIFIED BLOCKS ---
-
-      ## 🔔 Job Notifications (Fixed)
-      
       - name: 🎉 Notify on Success
         if: success()
         run: echo "✨ Model retraining, TFLite conversion, embeddings generation, and deployment successful, and version committed!"
