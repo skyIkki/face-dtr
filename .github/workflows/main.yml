@@ -50,25 +50,48 @@ jobs:
         env:
           FIREBASE_SERVICE_ACCOUNT_KEY: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_KEY }}
         run: python deploy_tflite_model.py
+        # deploy_tflite_model.py successfully runs the version update here
 
+      # --- START OF NEW/MODIFIED BLOCKS ---
 
+      - name: 💾 Commit and Push Updated Model/Version
+        # This step commits the new model version and artifacts to Git
+        run: |
+          # Read the NEW_VERSION that deploy_tflite_model.py just saved
+          NEW_VERSION=$(cat model_version.txt)
+
+          git config user.name "GitHub Actions Bot"
+          git config user.email "actions@github.com"
+
+          # Add the files that were changed by the pipeline
+          git add model_version.txt mobile_artifacts/ face_recognition_model.tflite # <-- Include tflite file if it's in the root
+          
+          # The '|| exit 0' makes the step pass if there are no changes to commit
+          git commit -m "🤖 MLOps: Automated model update to v${NEW_VERSION}" || exit 0
+          
+          # Push the committed changes to the main branch
+          git push
 
       - name: 🧹 Clean up Artifacts
+        # IMPORTANT: This step is modified to NOT delete model_version.txt or mobile_artifacts/
+        # as they were just committed and need to persist for the next run.
         run: |
           rm -rf user_training_data/
           rm -f training_data_unified/
           rm -f face_recognition_model.h5
           rm -f class_mapping.json
-          rm -f model_version.txt
-          rm -f face_recognition_model.tflite
           rm -f firebase_creds.json
-          rm -rf mobile_artifacts/
+          # Removed: rm -f model_version.txt
+          # Removed: rm -f face_recognition_model.tflite
+          # Removed: rm -rf mobile_artifacts/
+
+      # --- END OF NEW/MODIFIED BLOCKS ---
 
       ## 🔔 Job Notifications (Fixed)
       
       - name: 🎉 Notify on Success
         if: success()
-        run: echo "✨ Model retraining, TFLite conversion, embeddings generation, and deployment successful!"
+        run: echo "✨ Model retraining, TFLite conversion, embeddings generation, and deployment successful, and version committed!"
 
       - name: ❌ Notify on Failure
         if: failure()
