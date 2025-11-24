@@ -1,6 +1,7 @@
 name: Retrain Face Model (CI/CD)
 
 on:
+  # Trigger on push to main branch affecting training components
   push:
     branches:
       - main
@@ -10,12 +11,11 @@ on:
       - 'deploy_tflite_model.py'
       - 'base_training_data/**'
       - 'requirements.txt'
+  # Trigger daily retraining
   schedule:
     - cron: '0 0 * * *'
+  # Allow manual trigger from GitHub UI
   workflow_dispatch:
-
-permissions:
-  contents: write
 
 jobs:
   train_and_deploy_model:
@@ -25,9 +25,6 @@ jobs:
     steps:
       - name: 📥 Checkout Repository
         uses: actions/checkout@v4
-        with:
-          persist-credentials: true   # 🔥 REQUIRED TO ALLOW git push
-          fetch-depth: 0              # 🔥 REQUIRED FOR pushing commits
 
       - name: 🐍 Set up Python 3.10
         uses: actions/setup-python@v5
@@ -40,7 +37,6 @@ jobs:
           pip install --upgrade pip
           pip install -r requirements.txt
           pip install opencv-python firebase-admin tensorflow torch torchvision
-
       - name: 🧠 Run Keras Model Training (and H5 Deployment)
         env:
           FIREBASE_SERVICE_ACCOUNT_KEY: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_KEY }}
@@ -54,14 +50,7 @@ jobs:
           FIREBASE_SERVICE_ACCOUNT_KEY: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_KEY }}
         run: python deploy_tflite_model.py
 
-      - name: 💾 Commit and Push Updated Model/Version
-        run: |
-          NEW_VERSION=$(cat model_version.txt)
-          git config user.name "GitHub Actions Bot"
-          git config user.email "actions@github.com"
-          git add model_version.txt mobile_artifacts/
-          git commit -m "🤖 MLOps: Automated model update to v${NEW_VERSION}" || exit 0
-          git push
+
 
       - name: 🧹 Clean up Artifacts
         run: |
@@ -69,8 +58,12 @@ jobs:
           rm -f training_data_unified/
           rm -f face_recognition_model.h5
           rm -f class_mapping.json
+          rm -f model_version.txt
+          rm -f face_recognition_model.tflite
           rm -f firebase_creds.json
-
+          rm -rf mobile_artifacts/
+      ## 🔔 Job Notifications (Fixed)
+      
       - name: 🎉 Notify on Success
         if: success()
         run: echo "✨ Model retraining, TFLite conversion, embeddings generation, and deployment successful!"
