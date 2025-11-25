@@ -59,20 +59,19 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
       
-          # Stage files
           git add mobile_artifacts/ model_version.txt
       
-          # Commit if changes exist
           git commit -m "🤖 Auto-update model artifacts (v$(cat model_version.txt))" || echo "No changes to commit"
       
-          # Ensure we have the latest remote changes
+          # Sync with remote
           git fetch origin main
       
-          # Soft reset to remote main so we keep our commit on top
+          # Keep our commit but move base to remote main
           git reset --soft origin/main
       
-          # FINAL: Force-push updated commit to main
+          # Final push
           git push origin main --force
+
 
       - name: 🧹 Clean up Temporary Artifacts (SAFE)
         run: |
