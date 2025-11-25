@@ -54,20 +54,24 @@ jobs:
           FIREBASE_SERVICE_ACCOUNT_KEY: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_KEY }}
         run: python deploy_tflite_model.py
 
-      - name: 💾 Commit and Push Artifacts + Version
+      - name: 💾 Commit and Force-Push Artifacts + Version
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
       
-          # Add artifacts and version file
+          # Stage files
           git add mobile_artifacts/ model_version.txt
       
-          # Commit changes, skip if nothing to commit
+          # Commit if changes exist
           git commit -m "🤖 Auto-update model artifacts (v$(cat model_version.txt))" || echo "No changes to commit"
       
-          # Fetch latest remote and reset local main to match it, then force push
+          # Ensure we have the latest remote changes
           git fetch origin main
-          git reset origin/main --soft
+      
+          # Soft reset to remote main so we keep our commit on top
+          git reset --soft origin/main
+      
+          # FINAL: Force-push updated commit to main
           git push origin main --force
 
       - name: 🧹 Clean up Temporary Artifacts (SAFE)
