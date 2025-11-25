@@ -59,29 +59,19 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           
-          # 1. Stash the generated artifacts (TFLite model, version file, etc.)
-          #    This moves them to safety so we can switch branches without overwriting them.
-          git stash --include-untracked
-          
-          # 2. Checkout the actual 'main' branch
-          #    (Actions usually run in 'Detached HEAD' state, so we must switch to main)
+          # Checkout main and pull latest
           git checkout main
-          
-          # 3. Pull latest changes from remote to prevent "non-fast-forward" errors
           git pull origin main
           
-          # 4. Apply the generated artifacts back on top of the latest code
-          git stash pop
-          
-          # 5. Stage the specific files we want to update
+          # Overwrite artifacts with newly generated files
           git add mobile_artifacts/ model_version.txt
           
-          # 6. Commit
-          #    The '|| echo' prevents the workflow from crashing if there are no changes
+          # Commit (skip if nothing changed)
           git commit -m "🤖 Auto-update model artifacts (v$(cat model_version.txt))" || echo "No changes to commit"
           
-          # 7. Push changes
+          # Push changes
           git push origin main
+
 
 
       - name: 🧹 Clean up Temporary Artifacts (SAFE)
