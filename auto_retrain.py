@@ -7,7 +7,7 @@ auto_retrain.py (Face-Cropped, Quality-Filtered Version)
 - Adds padding, optional alignment, blur filtering.
 - Resizes crops to TARGET_SIZE for consistent embeddings.
 - Builds MobileNetV2 embedding extractor (128-D normalized).
-- Averages embeddings per employee and saves artifacts in mobile_artifacts/.
+- Averages embeddings per employee and saves artifacts in mobile_artifacts/..
 """
 
 import os
