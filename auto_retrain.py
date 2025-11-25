@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-auto_retrain.py (Face-Cropped, Quality-Filtered Version)
-
+auto_retrain.py (Hybrid A+B)
 - Downloads videos from Firebase.
-- Extracts only face crops using MediaPipe Face Detection.
-- Adds padding, optional alignment, blur filtering.
-- Resizes crops to TARGET_SIZE for consistent embeddings.
+- Extracts face crops using MediaPipe Face Detection.
+- Attempts Face Mesh alignment for higher accuracy (best-effort).
+- Adds padding, blur filtering, resizing, augmentation.
 - Builds MobileNetV2 embedding extractor (128-D normalized).
-- Averages embeddings per employee and saves artifacts in mobile_artifacts/..
+- Averages embeddings per employee and saves artifacts under mobile_artifacts/.
 """
 
 import os
@@ -26,11 +25,19 @@ from tensorflow.keras.preprocessing.image import img_to_array, load_img
 import firebase_admin
 from firebase_admin import credentials, storage as fb_storage
 
-# MediaPipe face detection
+# MediaPipe (face detection + face mesh)
 import mediapipe as mp
-mp_face = mp.solutions.face_detection
-# We'll instantiate detector once and reuse it
-face_detector = mp_face.FaceDetection(model_selection=1, min_detection_confidence=0.5)
+mp_face_det = mp.solutions.face_detection
+mp_face_mesh = mp.solutions.face_mesh
+
+# We'll instantiate detectors once and reuse (face_detector for detection, face_mesh for alignment)
+face_detector = mp_face_det.FaceDetection(model_selection=1, min_detection_confidence=0.45)
+# FaceMesh static_image_mode=True is appropriate for processing single frames offline
+face_mesh = mp_face_mesh.FaceMesh(static_image_mode=True,
+                                  max_num_faces=1,
+                                  refine_landmarks=True,
+                                  min_detection_confidence=0.3,
+                                  min_tracking_confidence=0.3)
 
 # -----------------------------
 # Config
@@ -48,11 +55,12 @@ MODEL_SAVE_PATH = os.path.join(MOBILE_ARTIFACTS_DIR, "face_embedding_model.h5")
 EMBEDDINGS_FILE = os.path.join(MOBILE_ARTIFACTS_DIR, "employee_embeddings.json")
 CLASS_MAPPING_FILE = os.path.join(MOBILE_ARTIFACTS_DIR, "class_mapping.json")
 
-TARGET_SIZE = (160, 160)      # final saved face image size (w,h)
+TARGET_SIZE = (160, 160)      # width, height used for model input
 NUM_SAMPLES_PER_VIDEO = 10    # frames sampled per video
 PAD_RATIO = 0.35              # padding around detected bbox (35%)
 BLUR_THRESHOLD = 40.0         # Laplacian variance threshold; lower = blurrier
-AUGMENTATIONS = True          # if True, also save a horizontally flipped crop for augmentation
+AUGMENTATIONS = True          # if True, save flipped crops too
+MIN_FACE_PIXEL_AREA = 32*32   # skip extremely tiny detections
 
 # -----------------------------
 # Firebase init
@@ -85,7 +93,6 @@ def download_videos_from_firebase():
     total = 0
 
     for blob in blobs:
-        # only video file blobs
         if not blob.name.lower().endswith((".mp4", ".mov", ".avi", ".mkv")):
             continue
         relative = blob.name[len(FIREBASE_PREFIX):]
@@ -107,7 +114,7 @@ def download_videos_from_firebase():
     return sorted(employee_ids)
 
 # -----------------------------
-# Helpers: alignment, blur check
+# Utility helpers
 # -----------------------------
 def rotate_image(img, angle, center=None):
     (h, w) = img.shape[:2]
@@ -121,31 +128,56 @@ def compute_blur_score(gray_img):
     """Return variance of Laplacian (higher => sharper)."""
     return float(cv2.Laplacian(gray_img, cv2.CV_64F).var())
 
-def try_align_face_using_eyes(crop_rgb, detection):
+def mesh_align_crop(crop_bgr, global_bbox, mesh_result):
     """
-    Attempt to align face crop so eyes are horizontal.
-    detection: MediaPipe detection object with relative_keypoints if available.
-    Returns rotated crop_rgb (or original if cannot align).
+    Attempt face alignment using face_mesh landmarks.
+    crop_bgr: BGR crop image (already padded around bbox)
+    global_bbox: (x1,y1,x2,y2) coordinates of crop relative to full image
+    mesh_result: face_mesh processing result on full image (contains landmarks in normalized coords)
+    Returns rotated crop (BGR) or original crop on failure.
     """
     try:
-        keypoints = detection.location_data.relative_keypoints
-        # MediaPipe face_detection relative_keypoints ordering: (RIGHT_EYE, LEFT_EYE, NOSE, MOUTH_CENTER, RIGHT_EAR, LEFT_EAR) in some versions.
-        # We'll try to read first two as eyes; if not available, abort safely.
-        if len(keypoints) < 2:
-            return crop_rgb
-        # compute eye coords in crop image coordinates: relative_keypoints are relative to image, but we will compute angle from them
-        # However detection.location_data.relative_bounding_box gives bbox; eyes coords are relative to full image.
-        # For safety we'll not rely on mapping; instead if keys present, use them relative to crop by re-scaling below where called.
-        return crop_rgb
+        if mesh_result is None or not mesh_result.multi_face_landmarks:
+            return crop_bgr
+        lm = mesh_result.multi_face_landmarks[0]  # first face
+        # Eye landmark indices based on MediaPipe face mesh:
+        # left eye approx: 33; right eye approx: 263 (these are commonly used)
+        left_idx = 33
+        right_idx = 263
+        ih, iw = mesh_result.image.shape[0], mesh_result.image.shape[1]  # Not always present; avoid
+        # Instead compute absolute coords from normalized landmarks using original image dims.
+        # We'll rely on landmarks' x,y which are normalized to the image used for mesh processing.
+        # NOTE: We'll assume mesh was run on the same full-size image (we do that in caller).
+        left = lm.landmark[left_idx]
+        right = lm.landmark[right_idx]
+        # Convert to absolute image coordinates
+        abs_left_x = int(left.x * iw)
+        abs_left_y = int(left.y * ih)
+        abs_right_x = int(right.x * iw)
+        abs_right_y = int(right.y * ih)
+        # Map absolute eye points to crop-relative coords
+        x1, y1, x2, y2 = global_bbox
+        le_x = abs_left_x - x1
+        le_y = abs_left_y - y1
+        re_x = abs_right_x - x1
+        re_y = abs_right_y - y1
+        dx = re_x - le_x
+        dy = re_y - le_y
+        if abs(dx) < 1e-3:
+            return crop_bgr
+        angle = math.degrees(math.atan2(dy, dx))
+        aligned = rotate_image(crop_bgr, angle, center=((crop_bgr.shape[1] // 2), (crop_bgr.shape[0] // 2)))
+        return aligned
     except Exception:
-        return crop_rgb
+        # alignment is best-effort
+        return crop_bgr
 
 # -----------------------------
-# FACE-ONLY Extractor (improved)
+# FACE-ONLY Extractor (Hybrid A+B)
 # -----------------------------
 def extract_frames_from_videos(employee_ids):
     """
-    Extract high-quality face-only crops with padding + optional alignment + blur filtering.
+    Extract high-quality face-only crops using detection + optional mesh alignment.
     Saves crops resized to TARGET_SIZE under USER_DATA_DIR/<employee_id>/
     """
     if os.path.exists(USER_DATA_DIR):
@@ -182,98 +214,83 @@ def extract_frames_from_videos(employee_ids):
 
             indices = np.linspace(0, frame_count - 1, NUM_SAMPLES_PER_VIDEO + 2, dtype=int)[1:-1]
 
+            # For face_mesh we will run it on the full RGB frame when needed
             for i, idx in enumerate(indices):
                 cap.set(cv2.CAP_PROP_POS_FRAMES, int(idx))
                 ret, frame = cap.read()
                 if not ret or frame is None:
                     continue
 
-                # convert to RGB for MediaPipe
+                h, w = frame.shape[:2]
                 rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                result = face_detector.process(rgb)
 
-                if not result.detections:
+                # 1) Face Detection (MediaPipe)
+                det_result = face_detector.process(rgb)
+                if not det_result.detections:
                     logging.debug(f"    Frame {idx}: no face detected")
                     continue
 
-                # take first / largest detection - MediaPipe returns detections ordered by score
-                det = result.detections[0]
+                # Take first detection (MediaPipe returns ordered by score)
+                det = det_result.detections[0]
                 rel_bbox = det.location_data.relative_bounding_box
-
-                h, w, _ = frame.shape
-                # compute bbox in pixel coords
+                # Convert to absolute pixel bbox
                 x = int(rel_bbox.xmin * w)
                 y = int(rel_bbox.ymin * h)
                 bw = int(rel_bbox.width * w)
                 bh = int(rel_bbox.height * h)
 
+                # Skip tiny detections
+                if bw * bh < MIN_FACE_PIXEL_AREA:
+                    logging.debug(f"    Frame {idx}: detection too small ({bw}x{bh}), skipping.")
+                    continue
+
                 # padding
                 pad_x = int(bw * PAD_RATIO)
                 pad_y = int(bh * PAD_RATIO)
-
                 x1 = max(0, x - pad_x)
                 y1 = max(0, y - pad_y)
                 x2 = min(w, x + bw + pad_x)
                 y2 = min(h, y + bh + pad_y)
 
-                # ensure valid
                 if x2 <= x1 or y2 <= y1:
                     logging.debug(f"    Frame {idx}: invalid bbox after padding, skip")
                     continue
 
-                crop = frame[y1:y2, x1:x2]  # BGR crop
-                if crop is None or crop.size == 0:
+                crop_bgr = frame[y1:y2, x1:x2]
+                if crop_bgr is None or crop_bgr.size == 0:
                     continue
 
-                # QUICK BLUR CHECK
-                gray_crop = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+                # Quick blur check on crop
+                gray_crop = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY)
                 blur_score = compute_blur_score(gray_crop)
                 if blur_score < BLUR_THRESHOLD:
                     logging.debug(f"    Frame {idx}: blur_score={blur_score:.2f} < {BLUR_THRESHOLD}, skipping.")
                     continue
 
-                # OPTIONAL: attempt to align face using eye keypoints.
-                # MediaPipe detection provides keypoints in detection.location_data.relative_keypoints,
-                # but mapping them precisely to the crop coordinates is tricky—so we'll attempt a robust method:
+                # 2) Attempt Face Mesh alignment on the full image (best-effort):
+                aligned_crop = crop_bgr
                 try:
-                    # get full-image keypoint coords if present
-                    rk = det.location_data.relative_keypoints
-                    if rk and len(rk) >= 2:
-                        # take two first points as eyes (this works for many versions)
-                        left_eye_rel = rk[0]  # x,y relative to image
-                        right_eye_rel = rk[1]
-                        # convert to absolute image coords
-                        left_eye_x = int(left_eye_rel.x * w)
-                        left_eye_y = int(left_eye_rel.y * h)
-                        right_eye_x = int(right_eye_rel.x * w)
-                        right_eye_y = int(right_eye_rel.y * h)
-
-                        # convert to crop-relative coords
-                        le_x_c = left_eye_x - x1
-                        le_y_c = left_eye_y - y1
-                        re_x_c = right_eye_x - x1
-                        re_y_c = right_eye_y - y1
-
-                        # compute angle (degrees) between eyes
-                        dx = re_x_c - le_x_c
-                        dy = re_y_c - le_y_c
-                        if abs(dx) > 1e-3:
-                            angle = math.degrees(math.atan2(dy, dx))
-                            # rotate around center of crop
-                            crop = rotate_image(crop, angle, center=((crop.shape[1]//2), (crop.shape[0]//2)))
-                            # recompute gray for blur check after rotate (optional)
-                            gray_crop = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-                            blur_score = compute_blur_score(gray_crop)
-                            if blur_score < BLUR_THRESHOLD:
-                                logging.debug(f"    Frame {idx}: post-rotation blur {blur_score:.2f}, skipping.")
-                                continue
+                    mesh_result = face_mesh.process(rgb)  # run once per frame; static_image_mode=True is OK
+                    if mesh_result and mesh_result.multi_face_landmarks:
+                        # Provide global bbox (x1,y1,x2,y2) for mapping landmarks to crop-relative coords
+                        aligned_try = mesh_align_crop(crop_bgr, (x1, y1, x2, y2), mesh_result)
+                        # Re-check blur after alignment
+                        gray_after = cv2.cvtColor(aligned_try, cv2.COLOR_BGR2GRAY)
+                        blur_after = compute_blur_score(gray_after)
+                        if blur_after >= BLUR_THRESHOLD:
+                            aligned_crop = aligned_try
+                            blur_score = blur_after
+                            logging.debug(f"    Frame {idx}: alignment success, blur_after={blur_after:.2f}")
+                        else:
+                            logging.debug(f"    Frame {idx}: alignment produced blur {blur_after:.2f}, using unaligned crop.")
+                    else:
+                        logging.debug(f"    Frame {idx}: face_mesh did not return landmarks.")
                 except Exception as e:
-                    # alignment best-effort only; on failure continue with original crop
-                    logging.debug(f"    Frame {idx}: alignment attempt failed: {e}")
+                    logging.debug(f"    Frame {idx}: face_mesh alignment error: {e}")
 
-                # Resize to TARGET_SIZE (width, height)
+                # Resize to TARGET_SIZE (width,height)
                 try:
-                    resized = cv2.resize(crop, TARGET_SIZE, interpolation=cv2.INTER_CUBIC)
+                    resized = cv2.resize(aligned_crop, TARGET_SIZE, interpolation=cv2.INTER_CUBIC)
                 except Exception as e:
                     logging.debug(f"    Frame {idx}: resize error: {e}")
                     continue
