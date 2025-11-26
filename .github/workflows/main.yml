@@ -20,83 +20,45 @@ permissions:
 jobs:
   train_and_deploy_model:
     runs-on: ubuntu-latest
-    environment: production
 
     steps:
-      # 1️⃣ Checkout repository
-      - name: 📥 Checkout Repository
+      - name: Checkout Repository
         uses: actions/checkout@v4
-        with:
-          persist-credentials: true
-          fetch-depth: 0
 
-      # 2️⃣ Setup Python
-      - name: 🐍 Set up Python 3.10
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-          cache: 'pip'
 
-      # 3️⃣ Install FFmpeg system library
-      - name: 🎬 Install FFmpeg
+      # Install system dependencies
+      - name: Install FFmpeg
+        run: sudo apt update && sudo apt install -y ffmpeg
+
+      # Force clean install of moviepy and dependencies
+      - name: Install Python Dependencies
         run: |
-          sudo apt update
-          sudo apt install -y ffmpeg
-          ffmpeg -version
+          python -m pip install --upgrade pip
+          pip uninstall -y moviepy imageio imageio-ffmpeg || true
+          pip install moviepy==2.3.1 imageio==2.31.1 imageio-ffmpeg==0.4.11
+          pip install -r requirements.txt
 
-      # 4️⃣ Clean install Python dependencies
-      - name: 📦 Clean & Install Python Dependencies
+      # Verify moviepy can be imported
+      - name: Verify moviepy installation
         run: |
-          pip install --upgrade pip
-          pip uninstall -y moviepy imageio imageio-ffmpeg
-          pip install moviepy>=2.1.0 imageio>=2.31.1 imageio-ffmpeg>=0.4.8
-          pip install --upgrade -r requirements.txt
+          python -c "import os; os.environ['IMAGEIO_FFMPEG_EXE']='/usr/bin/ffmpeg'; from moviepy.editor import VideoFileClip; import imageio_ffmpeg; print('✅ moviepy.editor works')"
 
-      # 5️⃣ Verify moviepy & ffmpeg
-      - name: 🧪 Verify moviepy & ffmpeg
-        run: |
-          python -c "import os; os.environ['IMAGEIO_FFMPEG_EXE']='/usr/bin/ffmpeg'; from moviepy.editor import VideoFileClip; import imageio_ffmpeg; print('✅ moviepy and ffmpeg detected')"
-
-      # 6️⃣ Run Auto-Retrain Pipeline
-      - name: 🧠 Run Keras Model Training (and H5 Deployment)
+      # Run auto retrain
+      - name: Run Auto-Retrain
         env:
           FIREBASE_SERVICE_ACCOUNT_KEY: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_KEY }}
         run: python auto_retrain.py
 
-      # 7️⃣ Convert Keras Model to TFLite
-      - name: 🛠️ Convert Keras Model to TFLite
+      # Convert to TFLite
+      - name: Convert to TFLite
         run: python convert_to_tflite.py
 
-      # 8️⃣ Deploy TFLite Artifacts for Mobile
-      - name: 🚀 Deploy TFLite Artifacts
+      # Deploy artifacts
+      - name: Deploy TFLite Artifacts
         env:
           FIREBASE_SERVICE_ACCOUNT_KEY: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_KEY }}
         run: python deploy_tflite_model.py
-
-      # 9️⃣ Commit and push artifacts
-      - name: 💾 Commit and Push Artifacts + Version
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git checkout main
-          git pull origin main
-          git add mobile_artifacts/ model_version.txt
-          git commit -m "🤖 Auto-update model artifacts (v$(cat model_version.txt))" || echo "No changes to commit"
-          git push origin main
-
-      # 🔟 Clean up temporary artifacts
-      - name: 🧹 Clean up Temporary Artifacts
-        run: |
-          rm -rf user_training_data/
-          rm -f training_data_unified/
-          rm -f firebase_creds.json
-
-      # 11️⃣ Notify on success
-      - name: 🎉 Notify on Success
-        if: success()
-        run: echo "✨ Model retraining, TFLite conversion, and deployment successful!"
-
-      # 12️⃣ Notify on failure
-      - name: ❌ Notify on Failure
-        if: failure()
-        run: echo "🚨 Model retraining pipeline failed! Check logs."
