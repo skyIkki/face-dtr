@@ -2,19 +2,20 @@ name: Retrain Face Model (CI/CD)
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
     paths:
-      - "auto_retrain.py"
-      - "convert_to_tflite.py"
-      - "deploy_tflite_model.py"
-      - "base_training_data/**"
-      - "requirements.txt"
+      - 'auto_retrain.py'
+      - 'convert_to_tflite.py'
+      - 'deploy_tflite_model.py'
+      - 'base_training_data/**'
+      - 'requirements.txt'
   schedule:
-    - cron: "0 0 * * *"
+    - cron: '0 0 * * *'
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: write   # 🔥 REQUIRED for git push
 
 jobs:
   train_and_deploy_model:
@@ -25,55 +26,60 @@ jobs:
       - name: 📥 Checkout Repository
         uses: actions/checkout@v4
         with:
-          persist-credentials: true
-          fetch-depth: 0
+          persist-credentials: true   # 🔥 REQUIRED
+          fetch-depth: 0              # 🔥 REQUIRED
 
-      - name: 🐍 Setup Python 3.10 (with pip cache)
+      - name: 🐍 Set up Python 3.10
         uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
-          cache: "pip"
+          python-version: '3.10'
+          cache: 'pip'
 
-      - name: 📦 Install Dependencies
+      - name: 📦 Install Python Dependencies
         run: |
           pip install --upgrade pip
           pip install -r requirements.txt
-
-      - name: 🧠 Train Face Recognition Model
+          pip install opencv-python firebase-admin tensorflow torch torchvision
+      - name: 🧠 Run Keras Model Training (and H5 Deployment)
         env:
           FIREBASE_SERVICE_ACCOUNT_KEY: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_KEY }}
         run: python auto_retrain.py
 
-      - name: 🛠 Convert Model to TFLite
+      - name: 🛠️ Convert Keras Model to TFLite
         run: python convert_to_tflite.py
 
-      - name: 🚀 Deploy TFLite Artifacts (for Mobile)
+      - name: 🚀 Deploy TFLite Artifacts for Mobile
         env:
           FIREBASE_SERVICE_ACCOUNT_KEY: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_KEY }}
         run: python deploy_tflite_model.py
 
-      - name: 💾 Commit & Push Updated Artifacts + Version
+      - name: 💾 Commit and Push Artifacts + Version
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-
+          
+          # Checkout main and pull latest
           git checkout main
           git pull origin main
-
+          
+          # Overwrite artifacts with newly generated files
           git add mobile_artifacts/ model_version.txt
-          git commit -m "🤖 Update artifacts (v$(cat model_version.txt))" || echo "No changes to commit"
+          
+          # Commit (skip if nothing changed)
+          git commit -m "🤖 Auto-update model artifacts (v$(cat model_version.txt))" || echo "No changes to commit"
+          
+          # Push changes
           git push origin main
-
-      - name: 🧹 Safe Cleanup (keep released artifacts)
+      - name: 🧹 Clean up Temporary Artifacts (SAFE)
         run: |
           rm -rf user_training_data/
-          rm -rf training_data_unified/
+          rm -f training_data_unified/
           rm -f firebase_creds.json
-
-      - name: ✅ Success Notify
+          # ❗️KEEP mobile_artifacts/ and model_version.txt (they must be pushed)
+      - name: 🎉 Notify on Success
         if: success()
-        run: echo "🎉 Model retrain + convert + deploy completed successfully!"
+        run: echo "✨ Model retraining, TFLite conversion, and deployment successful!"
 
-      - name: ❌ Failure Notify
+      - name: ❌ Notify on Failure
         if: failure()
-        run: echo "🚨 CI/CD Pipeline failed! Check logs."
+        run: echo "🚨 Model retraining pipeline failed! Check logs."
