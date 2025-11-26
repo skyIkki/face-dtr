@@ -15,7 +15,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write   # 🔥 REQUIRED for git push
+  contents: write    # REQUIRED for git push
 
 jobs:
   train_and_deploy_model:
@@ -26,8 +26,8 @@ jobs:
       - name: 📥 Checkout Repository
         uses: actions/checkout@v4
         with:
-          persist-credentials: true   # 🔥 REQUIRED
-          fetch-depth: 0              # 🔥 REQUIRED
+          persist-credentials: true    # REQUIRED
+          fetch-depth: 0               # REQUIRED
 
       - name: 🐍 Set up Python 3.10
         uses: actions/setup-python@v5
@@ -35,11 +35,19 @@ jobs:
           python-version: '3.10'
           cache: 'pip'
 
+      # 🚨 NEW STEP: INSTALL FFmpeg SYSTEM LIBRARY 🚨
+      - name: 🎬 Install System Dependencies (FFmpeg)
+        run: |
+          sudo apt update
+          sudo apt install -y ffmpeg
+
       - name: 📦 Install Python Dependencies
         run: |
           pip install --upgrade pip
+          # Installing all dependencies, including moviepy, which now finds ffmpeg
           pip install -r requirements.txt
-          pip install opencv-python firebase-admin tensorflow torch torchvision
+          # Removing redundant installations (they should all be in requirements.txt)
+          # pip install opencv-python firebase-admin tensorflow torch torchvision
 
       - name: 🧠 Run Keras Model Training (and H5 Deployment)
         env:
@@ -71,8 +79,6 @@ jobs:
           
           # Push changes
           git push origin main
-
-
 
       - name: 🧹 Clean up Temporary Artifacts (SAFE)
         run: |
