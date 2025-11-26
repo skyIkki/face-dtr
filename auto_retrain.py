@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 import os
+
+os.environ["IMAGEIO_FFMPEG_EXE"] = "/usr/bin/ffmpeg"
+
 import json
 import logging
 import numpy as np
