@@ -1,194 +1,330 @@
 #!/usr/bin/env python3
+"""
+auto_retrain.py (Hybrid A+B)
+
+✔ Downloads employee videos from Firebase
+✔ Extracts face crops using MediaPipe + optional Face Mesh alignment
+✔ Applies padding, blur filtering, resizing, and augmentation
+✔ Builds MobileNetV2 128-D normalized embeddings
+✔ Averages embeddings per employee and saves artifacts
+"""
+
 import os
-
-os.environ["IMAGEIO_FFMPEG_EXE"] = "/usr/bin/ffmpeg"
-from moviepy.editor import VideoFileClip
 import json
+import base64
 import logging
+import shutil
+import math
 import numpy as np
-import tensorflow as tf
-import mediapipe as mp
 import cv2
-from tensorflow.keras.models import Model
-from tensorflow.keras.layers import Input, Conv2D, Dense, GlobalAveragePooling2D, BatchNormalization, Activation, ReLU
+import tensorflow as tf
+from tensorflow.keras.applications import MobileNetV2
+from tensorflow.keras import layers, models
+from tensorflow.keras.preprocessing.image import img_to_array, load_img, load_img
 from tensorflow.keras.preprocessing.image import img_to_array
-from tensorflow.keras.applications.mobilenet_v2 import preprocess_input, MobileNetV2 # <-- IMPORTED
+from moviepy.editor import VideoFileClip  # ✅ Works once installed correctly
 
-from sklearn.cluster import DBSCAN
+# MediaPipe setup (face detection + face mesh alignment)
+import mediapipe as mp
+mp_face_det = mp.solutions.face_detection
+mp_face_mesh = mp.solutions.face_mesh
 
-# --- CONFIGURATION ---
-DATA_DIR = "video_training_data"
-MOBILE_ARTIFACTS_DIR = "mobile_artifacts"
-MODEL_FILENAME = "face_embedding_model.h5"
-EMBEDDINGS_JSON_FILENAME = "employee_embeddings.json"
+face_detector = mp_face_det.FaceDetection(model_selection=1, min_detection_confidence=0.45)
+face_mesh = mp_face_mesh.FaceMesh(
+    static_image_mode=True,
+    max_num_faces=1,
+    refine_landmarks=True,
+    min_detection_confidence=0.3,
+    min_tracking_confidence=0.3
+)
 
-# Face Extraction/Quality Params
-INPUT_SIZE = 160 # Target size for face crops (must match Java TFLite)
-PAD_RATIO = 0.35 # Padding around bounding box (must match Java inference)
-MIN_FACE_AREA_RATIO = 0.005 # Minimum face area relative to frame
-BLUR_THRESHOLD = 15.0 # Lower is sharper
-NUM_SAMPLES_PER_VIDEO = 30 # Increased for better coverage of instructed poses
+# ───────────────────────────
+# CONFIGURATION
+# ───────────────────────────
+logging.basicConfig(level=logging.INFO, format="%(asctime)s ─ %(levelname)s ─ %(message)s")
 
-# --- INITIAL SETUP ---
-os.makedirs(MOBILE_ARTIFACTS_DIR, exist_ok=True)
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+FIREBASE_PREFIX = "video_training_data/"
+FIREBASE_BUCKET = "face-dtr-6efa3.firebasestorage.app"
 
-# --- MODEL ARCHITECTURE ---
-def create_embedding_model(input_shape=(INPUT_SIZE, INPUT_SIZE, 3), embedding_dim=128):
-    # Base: MobileNetV2 without the top classification layer
-    base_model = MobileNetV2(input_shape=input_shape, include_top=False, weights='imagenet')
-    base_model.trainable = False # Freeze base weights
+TEMP_VIDEO_DIR = "user_videos_temp"
+TEMP_IMAGE_DIR = "user_training_data"
 
-    # Custom top layers for embedding
-    x = base_model.output
-    x = GlobalAveragePooling2D()(x)
-    x = Dense(embedding_dim, use_bias=False)(x)
-    # L2 Normalization is CRUCIAL for distance/similarity calculations
-    x = tf.math.l2_normalize(x, axis=1)
+ARTIFACTS_DIR = "mobile_artifacts"
+MODEL_SAVE = os.path.join(ARTIFACTS_DIR, "face_embedding_model.h5")
+EMBED_JSON = os.path.join(ARTIFACTS_DIR, "employee_embeddings.json")
+CLASS_JSON = os.path.join(ARTIFACTS_DIR, "class_mapping.json")
 
-    model = Model(inputs=base_model.input, outputs=x)
+FACE_SIZE = (160, 160)
+FRAMES_PER_VIDEO = 10
+PAD_RATIO = 0.35
+BLUR_LIMIT = 40.0
+MIN_FACE_AREA = 32 * 32
+APPLY_AUGMENT = True
+
+# ───────────────────────────
+# FIREBASE INITIALIZATION
+# ───────────────────────────
+def initialize_firebase():
+    if firebase_admin._apps:
+        return
+    svc_b64 = os.environ.get("FIREBASE_SERVICE_ACCOUNT_KEY")
+    if not svc_b64:
+        logging.critical("🚨 FIREBASE_SERVICE_ACCOUNT_KEY missing!")
+        raise SystemExit(1)
+
+    svc_json = base64.b64decode(svc_b64).decode("utf-8")
+    cred = credentials.Certificate(json.loads(svc_json))
+    firebase_admin.initialize_app(cred, {"storageBucket": FIREBASE_PREFIX})
+    logging.info("🔥 Firebase initialized successfully.")
+
+# ───────────────────────────
+# DOWNLOAD EMPLOYEE VIDEOS
+# ───────────────────────────
+def download_videos_from_firebase():
+    initialize_firebase()
+    bucket = storage.bucket()
+
+    if os.path.exists(TEMP_VIDEO_DIR):
+        shutil.rmtree(TEMP_VIDEO_DIR)
+    os.makedirs(TEMP_VIDEO_DIR, exist_ok=True)
+
+    blobs = bucket.list_blobs(prefix=FIREBASE_BUCKET)
+    employees = set()
+    count = 0
+
+    for blob in blobs:
+        if not blob.name.lower().endswith((".mp4", ".mov", ".avi", ".mkv")):
+            continue
+
+        path = blob.name[len(FIREBASE_PREFIX):].split("/")
+        if len(path) < 2:
+            continue
+
+        emp_id = path[0]
+        employees.add(emp_id)
+
+        emp_folder = os.path.join(TEMP_VIDEO_DIR, emp_id)
+        os.makedirs(emp_folder, exist_ok=True)
+
+        local_path = os.path.join(emp_folder, path[-1])
+        try:
+            blob.download_to_filename(local_path)
+            count += 1
+        except Exception as e:
+            logging.error(f"❌ Download failed: {blob.name} → {e}")
+
+    logging.info(f"✅ {count} videos downloaded for {len(employees)} employees.")
+    return sorted(employees)
+
+# ───────────────────────────
+# IMAGE HELPERS
+# ───────────────────────────
+def rotate_image(img, angle):
+    h, w = img.shape[:2]
+    center = (w // 2, h // 2)
+    M = cv2.getRotationMatrix2D(center, angle, 1.0)
+    return cv2.warpAffine(img, M, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+
+def blur_score(gray):
+    return float(cv2.Laplacian(gray, cv2.CV_64F).var())
+
+# Optional best-effort Face Mesh alignment
+def mesh_align_crop(crop_bgr, full_size, bbox):
+    try:
+        result = face_mesh.process(full_size)
+        if not result or not result.multi_face_landmarks:
+            return crop_bgr
+
+        lm = result.multi_face_landmarks[0]
+        left, right = lm.landmark[33], lm.landmark[263]
+
+        h, w = full_size.shape[:2]
+        lx, ly = int(left.x * w), int(left.y * h)
+        rx, ry = int(right.x * w), int(right.y * h)
+
+        x1, y1, x2, y2 = bbox
+        le_x, le_y = lx - x1, ly - y1
+        re_x, re_y = rx - x1, ry - y1
+
+        dx, dy = re_x - le_x, re_y - le_y
+        if abs(dx) < 0.001:
+            return crop_bgr
+
+        angle = math.degrees(math.atan2(dy, dx))
+        return rotate_image(crop_bgr, angle)
+
+    except Exception:
+        return crop_bgr  # alignment is optional → fail safe
+
+# ───────────────────────────
+# EXTRACT & SAVE FACE CROPS
+# ───────────────────────────
+def extract_frames_from_videos(employee_ids):
+    if os.path.exists(TEMP_IMAGE_DIR):
+        shutil.rmtree(TEMP_IMAGE_DIR)
+    os.makedirs(TEMP_IMAGE_DIR, exist_ok=True)
+
+    saved = 0
+
+    for emp_id in employee_ids:
+        video_path = os.path.join(TEMP_VIDEO_DIR, emp_id)
+        emp_folder = os.path.join(TEMP_IMAGE_DIR, emp_id)
+        os.makedirs(emp_folder, exist_ok=True)
+
+        if not os.path.exists(video_path):
+            continue
+
+        for video in os.listdir(video_path):
+            if not video.lower().endswith((".mp4", ".mov", ".avi", ".mkv")):
+                continue
+
+            cap = cv2.VideoCapture(os.path.join(video_path, video))
+            total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
+
+            if total == 0:
+                cap.release()
+                continue
+
+            frames = np.linspace(0, total - 1, FRAMES_PER_VIDEO + 2, dtype=int)[1:-1]
+
+            for i, f in enumerate(frames):
+                cap.set(cv2.CAP_PROP_POS_FRAMES, int(f))
+                ok, frame = cap.read()
+                if not ok or frame is None:
+                    continue
+
+                h, w = frame.shape[:2]
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+                detect = face_detector.process(rgb)
+                if not detect.detections:
+                    continue
+
+                box = detect.detections[0].location_data.relative_bounding_box
+                x, y = int(box.xmin * w), int(box.ymin * h)
+                bw, bh = int(box.width * w), int(box.height * h)
+
+                if bw * bh < MIN_FACE_AREA:
+                    continue
+
+                pad_w, pad_h = int(bw * PAD_RATIO), int(bh * PAD_RATIO)
+                x1, y1 = max(0, x - pad_w), max(0, y - pad_h)
+                x2, y2 = min(w, x + bw + pad_w), min(h, y + bh + pad_h)
+
+                if x2 <= x1 or y2 <= y1:
+                    continue
+
+                crop = frame[y1:y2, x1:x2]
+                gray_crop = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+                sharpness = blur_score(gray_crop)
+                if sharpness < BLUR_LIMIT:
+                    continue
+
+                # Try alignment (optional)
+                crop = mesh_align_crop(crop, rgb, (x1, y1, x2, y2))
+
+                try:
+                    crop = cv2.resize(crop, FACE_SIZE, interpolation=cv2.INTER_CUBIC)
+                except Exception:
+                    continue
+
+                name = f"{os.path.splitext(video)[0]}_frame{f}_{i+1}"
+                cv2.imwrite(os.path.join(emp_folder, f"{name}.jpg"), crop)
+                saved += 1
+
+                if APPLY_AUGMENT:
+                    cv2.imwrite(os.path.join(emp_folder, f"{name}_flip.jpg"), cv2.flip(crop, 1))
+
+            cap.release()
+
+    logging.info(f"🖼 {saved} face crops extracted and stored under '{TEMP_IMAGE_DIR}'.")
+
+# ───────────────────────────
+# BUILD EMBEDDING EXTRACTOR
+# ───────────────────────────
+def build_embedding_model():
+    base = MobileNetV2(input_shape=FACE_SIZE + (3,), include_top=False, weights="imagenet")
+    base.trainable = False
+
+    x = layers.GlobalAveragePooling2D()(base.output)
+    x = layers.Dense(128)(x)
+    x = layers.Lambda(lambda t: tf.math.l2_normalize(t, axis=1))(x)
+
+    model = models.Model(inputs=base.input, outputs=x)
+    logging.info("🧠 128-D MobileNetV2 embedding model ready.")
     return model
 
-# --- FACE EXTRACTION & QUALITY ---
-def extract_and_align_face(frame, face_landmarks_list):
-    # Implementation using MediaPipe FaceMesh to align, crop, and pad
-    # (Assuming your original detailed implementation is here)
-    # Ensure the returned crop uses the PAD_RATIO and INPUT_SIZE
-    # ... Your existing alignment/crop logic ...
+# ───────────────────────────
+# GENERATE EMPLOYEE EMBEDDINGS (AVERAGED)
+# ───────────────────────────
+def generate_employee_embeddings(model):
+    employees = [
+        d for d in os.listdir(TEMP_IMAGE_DIR)
+        if os.path.isdir(os.path.join(TEMP_IMAGE_DIR, d))
+    ]
 
-    # PLACEHOLDER for your existing extraction logic
-    # The crucial part is the padding and resizing:
-    # 1. Get face bounding box (via ML Kit/MediaPipe)
-    # 2. Apply PAD_RATIO to the box
-    # 3. Crop the frame to the padded box
-    # 4. Resize the cropped face to (INPUT_SIZE, INPUT_SIZE) e.g., 160x160
-    # 5. Return the PIL/OpenCV image
-    
-    # Since this is a massive block, I'll focus on the data handling:
-    return frame # Placeholder - must be an aligned, padded, and resized image (INPUT_SIZE x INPUT_SIZE)
+    vectors = {}
+    processed = 0
 
-def check_blur(image):
-    # Calculates the Laplacian variance to estimate blur
-    gray = cv2.cvtColor(np.array(image), cv2.COLOR_BGR2GRAY)
-    fm = cv2.Laplacian(gray, cv2.CV_64F).var()
-    return fm
+    for emp_id in employees:
+        folder = os.path.join(TEMP_IMAGE_DIR, emp_id)
+        faces = []
 
-def generate_embeddings(video_path, model):
-    embeddings = []
-    
-    try:
-        clip = VideoFileClip(video_path)
-        fps = clip.fps
-        duration = clip.duration
-        
-        # Sample frames linearly across the video
-        num_frames_to_sample = NUM_SAMPLES_PER_VIDEO
-        frame_indices = np.linspace(0, duration * fps - 1, num_frames_to_sample, dtype=int)
-        
-        mp_face_mesh = mp.solutions.face_mesh
-        
-        with mp_face_mesh.FaceMesh(static_image_mode=True, max_num_faces=1) as face_mesh:
-            for i, frame_index in enumerate(frame_indices):
-                try:
-                    frame = clip.get_frame(frame_index / fps)
-                    
-                    # Convert BGR (OpenCV standard from moviepy) to RGB
-                    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    results = face_mesh.process(rgb_frame)
+        for img in os.listdir(folder):
+            if not img.lower().endswith((".jpg", ".png", ".jpeg")):
+                continue
+            try:
+                arr = img_to_array(load_img(os.path.join(folder, img), target_size=FACE_SIZE)) / 255.0
+                emb = model.predict(np.expand_dims(arr, 0), verbose=0)[0]
+                faces.append(emb)
+                processed += 1
+            except Exception:
+                continue
 
-                    if results.multi_face_landmarks:
-                        # Extract, align, pad, and resize the face
-                        face_img = extract_and_align_face(rgb_frame, results.multi_face_landmarks[0])
-                        
-                        # Check quality
-                        blur_score = check_blur(face_img)
-                        if blur_score < BLUR_THRESHOLD:
-                            logging.warning(f"Frame {i+1} skipped: Too blurry (Score: {blur_score:.2f})")
-                            continue
+        if faces:
+            vectors[emp_id] = np.mean(np.vstack(faces), axis=0)
 
-                        # 1. Convert to array
-                        arr = img_to_array(face_img)
+    logging.info(f"✅ {len(vectors)} embeddings generated from {processed} images.")
+    return vectors
 
-                        # 2. CORRECT NORMALIZATION: Scale to [-1.0, 1.0] for MobileNetV2
-                        arr = preprocess_input(arr)
-                        
-                        # 3. Predict
-                        arr = np.expand_dims(arr, axis=0)
-                        emb = model.predict(arr, verbose=0)[0]
-                        embeddings.append(emb)
+# ───────────────────────────
+# SAVE OUTPUT ARTIFACTS
+# ───────────────────────────
+def save_artifacts(employee_ids, emb_vectors, model):
+    os.makedirs(ARTIFACTS_DIR, exist_ok=True)
 
-                except Exception as e:
-                    logging.error(f"Error processing frame {frame_index}: {e}")
-                    continue
-        
-    except Exception as e:
-        logging.error(f"Error reading video {video_path}: {e}")
-        return None
+    with open(CLASS_JSON, "w") as f:
+        json.dump({str(i): emp for i, emp in enumerate(employee_ids)}, f, indent=2)
+
+    with open(EMBED_JSON, "w") as f:
+        json.dump({k: v.tolist() for k, v in emb_vectors.items()}, f, indent=2)
+
+    model.save(MODEL_SAVE)
+    logging.info("🚀 Artifacts saved → ready for TFLite conversion.")
+
+# ───────────────────────────
+# CLEANUP TEMP DIRECTORIES
+# ───────────────────────────
+def cleanup_temp_dirs():
+    for d in (TEMP_VIDEO_DIR, TEMP_IMAGE_DIR):
+        if os.path.exists(d):
+            shutil.rmtree(d)
+            logging.info(f"🗑 Removed temp directory: {d}")
+
+# ───────────────────────────
+# PIPELINE EXECUTION
+# ───────────────────────────
+if __name__ == "__main__":
+    employees = download_videos_from_firebase()
+    if not employees:
+        raise SystemExit("No videos to process.")
+
+    extract_frames_from_videos(employees)
+    model = build_embedding_model()
+    embeddings = generate_employee_embeddings(model)
 
     if not embeddings:
-        logging.warning(f"No valid embeddings generated for {video_path}.")
-        return None
-    
-    # Average the high-quality embeddings
-    avg_embedding = np.mean(embeddings, axis=0)
-    return avg_embedding.tolist()
+        raise SystemExit("No embeddings created.")
 
-# --- MAIN EXECUTION ---
-def auto_retrain_pipeline():
-    logging.info("Starting Auto-Retrain Pipeline...")
-    
-    # 1. Load/Create Model
-    model = create_embedding_model()
-    
-    # 2. Collect employee video data
-    employee_embeddings = {}
-    employee_dirs = [d for d in os.listdir(DATA_DIR) if os.path.isdir(os.path.join(DATA_DIR, d))]
-    
-    if not employee_dirs:
-        logging.warning("No employee video data found. Skipping embedding generation.")
-        return
-
-    # 3. Generate Embeddings
-    for employee_id in employee_dirs:
-        employee_path = os.path.join(DATA_DIR, employee_id)
-        video_files = [os.path.join(employee_path, f) for f in os.listdir(employee_path) if f.endswith('.mp4')]
-        
-        if not video_files:
-            logging.warning(f"No videos found for employee {employee_id}. Skipping.")
-            continue
-            
-        logging.info(f"Processing {len(video_files)} video(s) for Employee: {employee_id}")
-        
-        all_embeddings = []
-        for video_file in video_files:
-            embedding = generate_embeddings(video_file, model)
-            if embedding:
-                all_embeddings.append(embedding)
-
-        if all_embeddings:
-            # Average embeddings across all videos for this employee
-            final_embedding = np.mean(all_embeddings, axis=0).tolist()
-            employee_embeddings[employee_id] = final_embedding
-            logging.info(f"Generated final embedding for {employee_id}.")
-            
-    # 4. Save Artifacts
-    if employee_embeddings:
-        # Save Keras model (.h5)
-        model.save(os.path.join(MOBILE_ARTIFACTS_DIR, MODEL_FILENAME))
-        logging.info(f"✅ Saved Keras model to {MOBILE_ARTIFACTS_DIR}/{MODEL_FILENAME}")
-
-        # Save embeddings JSON
-        with open(os.path.join(MOBILE_ARTIFACTS_DIR, EMBEDDINGS_JSON_FILENAME), 'w') as f:
-            json.dump(employee_embeddings, f, indent=4)
-        logging.info(f"✅ Saved employee embeddings to {MOBILE_ARTIFACTS_DIR}/{EMBEDDINGS_JSON_FILENAME}")
-    else:
-        logging.warning("No successful embeddings generated. Artifacts not updated.")
-
-    # Save class mapping (employee ID list for Java)
-    class_mapping = {idx: name for idx, name in enumerate(employee_embeddings.keys())}
-    with open(os.path.join(MOBILE_ARTIFACTS_DIR, "class_mapping.json"), 'w') as f:
-        json.dump(class_mapping, f, indent=4)
-    logging.info(f"✅ Saved class mapping.")
-
-if __name__ == "__main__":
-    auto_retrain_pipeline()
+    save_artifacts(employees, embeddings, model)
+    cleanup_temp_dirs()
