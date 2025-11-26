@@ -4,17 +4,17 @@ on:
   push:
     branches: [main]
     paths:
-      - 'auto_retrain.py'
-      - 'convert_to_tflite.py'
-      - 'deploy_tflite_model.py'
-      - 'base_training_data/**'
-      - 'requirements.txt'
+      - "auto_retrain.py"
+      - "convert_to_tflite.py"
+      - "deploy_tflite_model.py"
+      - "base_training_data/**"
+      - "requirements.txt"
   schedule:
-    - cron: '0 0 * * *'
+    - cron: "0 0 * * *"
   workflow_dispatch:
 
 permissions:
-  contents: write  # Allows committing artifacts back to repo
+  contents: write
 
 jobs:
   train_and_deploy_model:
@@ -28,32 +28,18 @@ jobs:
           persist-credentials: true
           fetch-depth: 0
 
-      - name: 🐍 Set up Python 3.10
+      - name: 🐍 Setup Python 3.10 (with pip cache)
         uses: actions/setup-python@v5
         with:
           python-version: "3.10"
           cache: "pip"
 
-      - name: ⚙ Install System Dependencies
-        run: |
-          sudo apt update
-          sudo apt install -y ffmpeg libsm6 libxext6
-
-      - name: 📦 Install Python Dependencies
+      - name: 📦 Install Dependencies
         run: |
           pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: ✅ Validate MoviePy + FFmpeg
-        run: |
-          python - <<EOF
-          import os
-          os.environ["IMAGEIO_FFMPEG_EXE"] = "/usr/bin/ffmpeg"
-          from moviepy.editor import VideoFileClip
-          print("✅ MoviePy and FFmpeg detected!")
-          EOF
-
-      - name: 🧠 Run Retraining Pipeline (auto_retrain.py)
+      - name: 🧠 Train Face Recognition Model
         env:
           FIREBASE_SERVICE_ACCOUNT_KEY: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_KEY }}
         run: python auto_retrain.py
@@ -61,33 +47,33 @@ jobs:
       - name: 🛠 Convert Model to TFLite
         run: python convert_to_tflite.py
 
-      - name: 🚀 Deploy Mobile TFLite Artifacts
+      - name: 🚀 Deploy TFLite Artifacts (for Mobile)
         env:
           FIREBASE_SERVICE_ACCOUNT_KEY: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_KEY }}
         run: python deploy_tflite_model.py
 
-      - name: 💾 Commit & Push Updated Artifacts
-        if: success()
+      - name: 💾 Commit & Push Updated Artifacts + Version
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+
           git checkout main
           git pull origin main
+
           git add mobile_artifacts/ model_version.txt
-          git commit -m "🤖 Update model artifacts (v$(cat model_version.txt))" || echo "No changes to commit"
+          git commit -m "🤖 Update artifacts (v$(cat model_version.txt))" || echo "No changes to commit"
           git push origin main
 
-      - name: 🧹 Cleanup Temporary Files (SAFE)
-        if: always()
+      - name: 🧹 Safe Cleanup (keep released artifacts)
         run: |
           rm -rf user_training_data/
           rm -rf training_data_unified/
           rm -f firebase_creds.json
 
-      - name: 🎉 Success Notification
+      - name: ✅ Success Notify
         if: success()
-        run: echo "✨ Model retraining, TFLite conversion, and deployment successful!"
+        run: echo "🎉 Model retrain + convert + deploy completed successfully!"
 
-      - name: ❌ Failure Notification
+      - name: ❌ Failure Notify
         if: failure()
-        run: echo "🚨 Pipeline failed! Check retrain logs above."
+        run: echo "🚨 CI/CD Pipeline failed! Check logs."
