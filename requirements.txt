@@ -23,4 +23,4 @@ protobuf<4
 # moviepy==2.2.1  <-- REMOVE VERSION PIN
 moviepy
 imageio==2.31.1
-imageio-ffmpeg==0.4.11
+imageio-ffmpeg==0.6.0
