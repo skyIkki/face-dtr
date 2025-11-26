@@ -2,7 +2,7 @@
 import os
 
 os.environ["IMAGEIO_FFMPEG_EXE"] = "/usr/bin/ffmpeg"
-
+from moviepy.editor import VideoFileClip
 import json
 import logging
 import numpy as np
@@ -13,7 +13,7 @@ from tensorflow.keras.models import Model
 from tensorflow.keras.layers import Input, Conv2D, Dense, GlobalAveragePooling2D, BatchNormalization, Activation, ReLU
 from tensorflow.keras.preprocessing.image import img_to_array
 from tensorflow.keras.applications.mobilenet_v2 import preprocess_input, MobileNetV2 # <-- IMPORTED
-from moviepy.editor import VideoFileClip
+
 from sklearn.cluster import DBSCAN
 
 # --- CONFIGURATION ---
