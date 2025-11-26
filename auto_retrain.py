@@ -137,24 +137,6 @@ def mesh_align_crop(crop_bgr, global_bbox, mesh_result):
     Returns rotated crop (BGR) or original crop on failure.
     """
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     try:
         if mesh_result is None or not mesh_result.multi_face_landmarks:
             return crop_bgr
@@ -307,48 +289,12 @@ def extract_frames_from_videos(employee_ids):
                 except Exception as e:
                     logging.debug(f"    Frame {idx}: face_mesh alignment error: {e}")
 
-
-
-
-
-
-
-
-
-
                 # Resize to TARGET_SIZE (width,height)
                 try:
                     resized = cv2.resize(aligned_crop, TARGET_SIZE, interpolation=cv2.INTER_CUBIC)
                 except Exception as e:
                     logging.debug(f"    Frame {idx}: resize error: {e}")
                     continue
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
                 # Save main crop
                 base_name = f"{os.path.splitext(video_file)[0]}_f{idx}_face_{i+1}"
