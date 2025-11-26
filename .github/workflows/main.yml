@@ -43,10 +43,8 @@ jobs:
       - name: 📦 Install Python Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip uninstall -y moviepy imageio imageio-ffmpeg || true
-          # Use a valid MoviePy version
-          pip install moviepy==2.2.1 imageio==2.31.1 imageio-ffmpeg==0.4.11
           pip install -r requirements.txt
+
 
       # 5️⃣ Verify moviepy & ffmpeg
       - name: 🧪 Verify moviepy installation
