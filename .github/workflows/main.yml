@@ -15,7 +15,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write    # REQUIRED for git push
+  contents: write
 
 jobs:
   train_and_deploy_model:
@@ -26,8 +26,8 @@ jobs:
       - name: 📥 Checkout Repository
         uses: actions/checkout@v4
         with:
-          persist-credentials: true    # REQUIRED
-          fetch-depth: 0               # REQUIRED
+          persist-credentials: true
+          fetch-depth: 0
 
       - name: 🐍 Set up Python 3.10
         uses: actions/setup-python@v5
@@ -35,62 +35,60 @@ jobs:
           python-version: '3.10'
           cache: 'pip'
 
-      # 🚨 NEW STEP: INSTALL FFmpeg SYSTEM LIBRARY 🚨
-      - name: 🎬 Install System Dependencies (FFmpeg)
+      # Install FFmpeg system library
+      - name: 🎬 Install FFmpeg
         run: |
           sudo apt update
           sudo apt install -y ffmpeg
+          ffmpeg -version
 
+      # Install Python dependencies
       - name: 📦 Install Python Dependencies
         run: |
           pip install --upgrade pip
-          # Installing all dependencies, including moviepy, which now finds ffmpeg
+          pip install --upgrade moviepy
           pip install -r requirements.txt
-          # Removing redundant installations (they should all be in requirements.txt)
-          # pip install opencv-python firebase-admin tensorflow torch torchvision
 
+      # Run Auto-Retrain Pipeline
       - name: 🧠 Run Keras Model Training (and H5 Deployment)
         env:
           FIREBASE_SERVICE_ACCOUNT_KEY: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_KEY }}
         run: python auto_retrain.py
 
+      # Convert Keras Model to TFLite
       - name: 🛠️ Convert Keras Model to TFLite
         run: python convert_to_tflite.py
 
+      # Deploy TFLite Artifacts
       - name: 🚀 Deploy TFLite Artifacts for Mobile
         env:
           FIREBASE_SERVICE_ACCOUNT_KEY: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_KEY }}
         run: python deploy_tflite_model.py
 
+      # Commit and Push Artifacts
       - name: 💾 Commit and Push Artifacts + Version
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          
-          # Checkout main and pull latest
           git checkout main
           git pull origin main
-          
-          # Overwrite artifacts with newly generated files
           git add mobile_artifacts/ model_version.txt
-          
-          # Commit (skip if nothing changed)
           git commit -m "🤖 Auto-update model artifacts (v$(cat model_version.txt))" || echo "No changes to commit"
-          
-          # Push changes
           git push origin main
 
-      - name: 🧹 Clean up Temporary Artifacts (SAFE)
+      # Clean up temporary artifacts
+      - name: 🧹 Clean up Temporary Artifacts
         run: |
           rm -rf user_training_data/
           rm -f training_data_unified/
           rm -f firebase_creds.json
-          # ❗️KEEP mobile_artifacts/ and model_version.txt (they must be pushed)
 
+      # Notify on success
       - name: 🎉 Notify on Success
         if: success()
         run: echo "✨ Model retraining, TFLite conversion, and deployment successful!"
 
+      # Notify on failure
       - name: ❌ Notify on Failure
         if: failure()
         run: echo "🚨 Model retraining pipeline failed! Check logs."
