@@ -5,11 +5,12 @@ tensorflow==2.14.0
 Pillow 
 numpy<2 
 scipy 
-cikit-learn f
+scikit-learn f
 irebase-admin 
 google-cloud-storage 
 google-cloud-core 
-opencv-python mediapipe==0.10.11 
+opencv-python 
+mediapipe==0.10.11 
 requests protobuf<4 
 # moviepy==2.2.1 <-- REMOVE VERSION PIN 
 moviepy 
