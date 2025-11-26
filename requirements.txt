@@ -20,4 +20,4 @@ mediapipe==0.10.11
 requests
 protobuf<4
 
-moviepy
+moviepy>=2.0.0
